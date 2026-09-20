@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/bg_dark">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <!-- Header with Title and Import Action -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="3D Asset Library"
+                android:textColor="@color/text_primary"
+                android:textSize="22sp"
+                android:textStyle="bold" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_import_asset"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="Import"
+                android:textColor="@color/primary"
+                android:textSize="12sp"
+                app:icon="@android:drawable/ic_input_add"
+                app:iconTint="@color/primary" />
+        </LinearLayout>
+
+        <EditText
+            android:id="@+id/et_search_assets"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="12dp"
+            android:background="@color/bg_card"
+            android:drawableStart="@android:drawable/ic_menu_search"
+            android:drawablePadding="10dp"
+            android:hint="Search assets by name or category..."
+            android:paddingHorizontal="12dp"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_muted"
+            android:textSize="14sp" />
+
+        <!-- Category Chips -->
+        <HorizontalScrollView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:scrollbars="none">
+
+            <LinearLayout
+                android:id="@+id/layout_asset_categories"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/chip_cat_all"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="6dp"
+                    android:text="All"
+                    android:textColor="@color/primary"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/chip_cat_characters"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="6dp"
+                    android:text="Characters"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp"
+                    app:strokeColor="@color/border_dark" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/chip_cat_objects"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="6dp"
+                    android:text="Objects"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp"
+                    app:strokeColor="@color/border_dark" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/chip_cat_buildings"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:layout_marginEnd="6dp"
+                    android:text="Buildings"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp"
+                    app:strokeColor="@color/border_dark" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/chip_cat_materials"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="Materials"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="12sp"
+                    app:strokeColor="@color/border_dark" />
+            </LinearLayout>
+        </HorizontalScrollView>
+
+        <!-- Grid List -->
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/rv_assets"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="16dp"
+            android:layout_weight="1"
+            android:clipToPadding="false"
+            android:paddingBottom="76dp" />
+    </LinearLayout>
+
+    <!-- Floating Action Button for Quick Import -->
+    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
+        android:id="@+id/fab_import_asset"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="20dp"
+        android:text="Import 3D Asset"
+        android:textColor="@color/text_primary"
+        app:backgroundTint="@color/bg_card"
+        app:icon="@android:drawable/ic_input_add"
+        app:iconTint="@color/primary"
+        app:strokeColor="@color/border_dark"
+        app:strokeWidth="1dp" />
+
+</FrameLayout>
