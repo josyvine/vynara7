@@ -17,6 +17,25 @@ public class AIDirectorSpec {
     private String visualStyleNotes = "Dynamic procedural 3D scene.";
     private String objectCategory = "general";
 
+    // Dynamic Environment & Path Geography (Zero Hardcoded Road Constraints)
+    private String pathType = "spline_curve"; // "spline_curve", "hairpin_mountain", "coastal_track", "airport_runway", "open_sky", "pedestal"
+    private float pathLengthMeters = 1000.0f; // Supports 500m, 1km, 5km dynamic lengths
+    private float pathWidthMeters = 14.0f;
+    private String terrainType = "coastal_cliff"; // "coastal_cliff", "mountain_pass", "desert", "cyber_city", "studio"
+    private float terrainElevationMeters = 25.0f;
+
+    // Subject Classification & Real-World Proportions
+    private String subjectCategory = "supercar"; // "supercar", "aircraft", "marine", "humanoid", "creature", "architecture", "prop"
+    private float targetSubjectLengthMeters = 4.5f; // 4.5m car, 60m plane, 1.8m human, 15m boat, 0.1m prop
+
+    // Dynamic Timeline & Kinetic Motion
+    private float animationDurationSeconds = 5.0f; // 5.0s, 10.0s sequence
+    private int totalFrames = 150; // 150 frames @ 30fps
+    private int fps = 30;
+    private String cameraTrackingStyle = "ground_level_chase"; // "ground_level_chase", "drone_overhead", "orbit", "flyby"
+    private float cameraHeightMeters = 0.20f; // 0.15m - 0.20m for low tarmac chase
+    private float cameraDistanceMeters = 6.5f;
+
     // Dynamic 4-Worker Layer Contracts
     private String w1StructureSpec = "";
     private String w2DetailsSpec = "";
@@ -38,18 +57,18 @@ public class AIDirectorSpec {
     private float clearcoat = 0.0f;
 
     // Camera Contract
-    private float focalLengthMm = 50.0f;
-    private float apertureFStop = 1.8f; // f/1.8 for shallow depth-of-field bokeh
-    private float focusDistance = 4.5f;
-    private float[] cameraPosition = new float[] { 0.0f, -7.0f, 2.5f };
-    private float[] cameraTarget = new float[] { 0.0f, 0.0f, 1.2f };
+    private float focalLengthMm = 35.0f;
+    private float apertureFStop = 2.8f; // f/2.8 for cinematic depth-of-field bokeh
+    private float focusDistance = 5.0f;
+    private float[] cameraPosition = new float[] { -3.8f, -7.0f, 2.0f };
+    private float[] cameraTarget = new float[] { 0.0f, 0.0f, 0.8f };
 
     // Atmosphere & Volumetric Lighting Contract
     private boolean useVolumetrics = true;
     private float volumetricDensity = 0.015f; // Standard density for light shafts
-    private float sunElevation = 18.0f;       // Low sun angle for long shadows
+    private float sunElevation = 18.0f;       // Low golden-hour sun angle
     private float sunAzimuth = 45.0f;
-    private float sunIntensity = 4.5f;
+    private float sunIntensity = 6.0f;
     private String ambientColorHex = "#202835";
 
     // Palette & Material Contract
@@ -81,6 +100,25 @@ public class AIDirectorSpec {
         spec.mood = json.optString("mood", spec.mood);
         spec.visualStyleNotes = json.optString("visualStyleNotes", spec.visualStyleNotes);
         spec.objectCategory = json.optString("objectCategory", spec.objectCategory);
+
+        // Dynamic Path & Terrain Parameters
+        spec.pathType = json.optString("pathType", spec.pathType);
+        spec.pathLengthMeters = (float) json.optDouble("pathLengthMeters", spec.pathLengthMeters);
+        spec.pathWidthMeters = (float) json.optDouble("pathWidthMeters", spec.pathWidthMeters);
+        spec.terrainType = json.optString("terrainType", spec.terrainType);
+        spec.terrainElevationMeters = (float) json.optDouble("terrainElevationMeters", spec.terrainElevationMeters);
+
+        // Subject Category & Scale
+        spec.subjectCategory = json.optString("subjectCategory", spec.subjectCategory);
+        spec.targetSubjectLengthMeters = (float) json.optDouble("targetSubjectLengthMeters", spec.targetSubjectLengthMeters);
+
+        // Timeline & Motion
+        spec.animationDurationSeconds = (float) json.optDouble("animationDurationSeconds", spec.animationDurationSeconds);
+        spec.totalFrames = json.optInt("totalFrames", (int) (spec.animationDurationSeconds * spec.fps));
+        spec.fps = json.optInt("fps", spec.fps);
+        spec.cameraTrackingStyle = json.optString("cameraTrackingStyle", spec.cameraTrackingStyle);
+        spec.cameraHeightMeters = (float) json.optDouble("cameraHeightMeters", spec.cameraHeightMeters);
+        spec.cameraDistanceMeters = (float) json.optDouble("cameraDistanceMeters", spec.cameraDistanceMeters);
 
         // Parse Dynamic 4-Worker Layer Specs
         JSONObject workersObj = json.optJSONObject("workers");
@@ -154,6 +192,22 @@ public class AIDirectorSpec {
             root.put("mood", mood);
             root.put("visualStyleNotes", visualStyleNotes);
             root.put("objectCategory", objectCategory);
+
+            root.put("pathType", pathType);
+            root.put("pathLengthMeters", pathLengthMeters);
+            root.put("pathWidthMeters", pathWidthMeters);
+            root.put("terrainType", terrainType);
+            root.put("terrainElevationMeters", terrainElevationMeters);
+
+            root.put("subjectCategory", subjectCategory);
+            root.put("targetSubjectLengthMeters", targetSubjectLengthMeters);
+
+            root.put("animationDurationSeconds", animationDurationSeconds);
+            root.put("totalFrames", totalFrames);
+            root.put("fps", fps);
+            root.put("cameraTrackingStyle", cameraTrackingStyle);
+            root.put("cameraHeightMeters", cameraHeightMeters);
+            root.put("cameraDistanceMeters", cameraDistanceMeters);
 
             JSONObject workersObj = new JSONObject();
             workersObj.put("w1_structure", w1StructureSpec);
@@ -245,6 +299,112 @@ public class AIDirectorSpec {
 
     public void setObjectCategory(String objectCategory) {
         this.objectCategory = objectCategory;
+    }
+
+    public String getPathType() {
+        return pathType;
+    }
+
+    public void setPathType(String pathType) {
+        this.pathType = pathType;
+    }
+
+    public float getPathLengthMeters() {
+        return pathLengthMeters;
+    }
+
+    public void setPathLengthMeters(float pathLengthMeters) {
+        this.pathLengthMeters = pathLengthMeters;
+    }
+
+    public float getPathWidthMeters() {
+        return pathWidthMeters;
+    }
+
+    public void setPathWidthMeters(float pathWidthMeters) {
+        this.pathWidthMeters = pathWidthMeters;
+    }
+
+    public String getTerrainType() {
+        return terrainType;
+    }
+
+    public void setTerrainType(String terrainType) {
+        this.terrainType = terrainType;
+    }
+
+    public float getTerrainElevationMeters() {
+        return terrainElevationMeters;
+    }
+
+    public void setTerrainElevationMeters(float terrainElevationMeters) {
+        this.terrainElevationMeters = terrainElevationMeters;
+    }
+
+    public String getSubjectCategory() {
+        return subjectCategory;
+    }
+
+    public void setSubjectCategory(String subjectCategory) {
+        this.subjectCategory = subjectCategory;
+    }
+
+    public float getTargetSubjectLengthMeters() {
+        return targetSubjectLengthMeters;
+    }
+
+    public void setTargetSubjectLengthMeters(float targetSubjectLengthMeters) {
+        this.targetSubjectLengthMeters = targetSubjectLengthMeters;
+    }
+
+    public float getAnimationDurationSeconds() {
+        return animationDurationSeconds;
+    }
+
+    public void setAnimationDurationSeconds(float animationDurationSeconds) {
+        this.animationDurationSeconds = animationDurationSeconds;
+        this.totalFrames = (int) (animationDurationSeconds * this.fps);
+    }
+
+    public int getTotalFrames() {
+        return totalFrames;
+    }
+
+    public void setTotalFrames(int totalFrames) {
+        this.totalFrames = totalFrames;
+    }
+
+    public int getFps() {
+        return fps;
+    }
+
+    public void setFps(int fps) {
+        this.fps = fps;
+        this.totalFrames = (int) (this.animationDurationSeconds * fps);
+    }
+
+    public String getCameraTrackingStyle() {
+        return cameraTrackingStyle;
+    }
+
+    public void setCameraTrackingStyle(String cameraTrackingStyle) {
+        this.cameraTrackingStyle = cameraTrackingStyle;
+    }
+
+    public float getCameraHeightMeters() {
+        return cameraHeightMeters;
+    }
+
+    public void setCameraHeightMeters(float cameraHeightMeters) {
+        this.cameraHeightMeters = cameraHeightMeters;
+    }
+
+    public float getCameraDistanceMeters() {
+        return cameraDistanceMeters;
+    }
+
+    public void setCameraDistanceMeters(float cameraDistanceMeters) {
+        this.cameraDistanceMeters = cameraDistanceMeters;
     }
 
     public String getW1StructureSpec() {
