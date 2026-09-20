@@ -558,7 +558,7 @@ public class StudioFragment extends Fragment {
             flatList = new ArrayList<>(activeScene.getFlatObjectList());
         }
 
-        // Priority 1: Focus on Vehicle or Hero subject (ignoring the 250m long road geometry)
+        // Priority 1: Focus on Vehicle or Hero subject (ignoring the long road/terrain geometry)
         float minX = Float.POSITIVE_INFINITY, minY = Float.POSITIVE_INFINITY, minZ = Float.POSITIVE_INFINITY;
         float maxX = Float.NEGATIVE_INFINITY, maxY = Float.NEGATIVE_INFINITY, maxZ = Float.NEGATIVE_INFINITY;
         boolean hasSubject = false;
