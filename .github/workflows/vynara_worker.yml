@@ -1,0 +1,698 @@
+name: Vynara Blender Worker
+
+on:
+  repository_dispatch:
+    types: [vynara_generate, vynara_agentic_auto, vynara_agentic_interactive, vynara_neural_reconstruct]
+
+jobs:
+  build_3d_asset:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 1: Check GitHub Actions Cache (Restores in ~3s on Run 2+)
+      - name: Restore Blender Cache
+        id: blender-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/blender
+          key: blender-4.2-linux-x64
+
+      # Step 2: Download ONLY on first run (Skipped on all future runs)
+      - name: Download Blender Binary
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo mkdir -p /opt/blender
+          curl -sL https://download.blender.org/release/Blender4.2/blender-4.2.0-linux-x64.tar.xz | sudo tar -xJ --strip-components=1 -C /opt/blender
+
+      # Step 3: Install Virtual Display Server, Media Libraries, EGL Drivers & 3D Conversion Tools
+      - name: Install Headless Display Server (Xvfb), FFmpeg, EGL and Assimp
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb ffmpeg libsm6 libxext6 libgl1 libegl1 libgl1-mesa-dri assimp-utils
+
+      # Step 4: Ingest and Auto-Convert Uploaded 3D Models (Resolves ASCII FBX limitation)
+      - name: Ingest and Prepare 3D Model
+        run: |
+          mkdir -p inputs
+          
+          # Early extraction of base64 model payloads so Assimp can inspect and convert if needed
+          python3 - << 'PYEOF'
+          import json, os, base64
+          event_path = os.environ.get('GITHUB_EVENT_PATH')
+          if event_path and os.path.exists(event_path):
+              try:
+                  with open(event_path, 'r', encoding='utf-8') as ef:
+                      event_data = json.load(ef)
+                      payload = event_data.get('client_payload', {})
+                      input_model_b64 = payload.get('input_model_b64', '')
+                      if input_model_b64 and input_model_b64.strip():
+                          with open('input_model.glb', 'wb') as mf:
+                              mf.write(base64.b64decode(input_model_b64))
+                          os.makedirs('inputs', exist_ok=True)
+                          with open('inputs/input_model.glb', 'wb') as mf2:
+                              mf2.write(base64.b64decode(input_model_b64))
+                          print("Early unpacked base64 model: input_model.glb")
+              except Exception as e:
+                  print(f"Early payload read notice: {e}")
+          PYEOF
+
+          MODEL_PATH="${{ github.event.client_payload.model_path }}"
+
+          if [ -n "$MODEL_PATH" ] && [ -f "$MODEL_PATH" ]; then
+            EXT="${MODEL_PATH##*.}"
+            cp "$MODEL_PATH" "input_model.$EXT"
+            cp "$MODEL_PATH" "inputs/input_model.$EXT" 2>/dev/null || true
+            echo "Ingested input model from $MODEL_PATH -> input_model.$EXT ($(stat -c%s input_model.$EXT) bytes)"
+          elif [ -d "inputs" ]; then
+            FOUND_FILE=$(find inputs -type f \( -name "*.fbx" -o -name "*.glb" -o -name "*.gltf" -o -name "*.obj" \) | head -n 1)
+            if [ -n "$FOUND_FILE" ]; then
+              EXT="${FOUND_FILE##*.}"
+              cp "$FOUND_FILE" "input_model.$EXT"
+              echo "Ingested auto-detected model: $FOUND_FILE -> input_model.$EXT ($(stat -c%s input_model.$EXT) bytes)"
+            fi
+          fi
+
+          # Autonomous format inspection: Detect ASCII FBX across root and inputs/ and auto-convert to standard GLB
+          for fbx_candidate in "input_model.fbx" "inputs/input_model.fbx"; do
+            if [ -f "$fbx_candidate" ]; then
+              if ! head -c 20 "$fbx_candidate" | grep -q "Kaydara FBX Binary"; then
+                echo "Detected ASCII FBX at $fbx_candidate (unsupported natively by Blender). Auto-converting via assimp..."
+                assimp export "$fbx_candidate" "input_model.glb"
+                if [ -f "input_model.glb" ] && [ -s "input_model.glb" ]; then
+                  echo "Successfully converted ASCII FBX -> input_model.glb ($(stat -c%s input_model.glb) bytes)"
+                  cp "input_model.glb" "inputs/input_model.glb"
+                  rm -f "$fbx_candidate"
+                fi
+              else
+                echo "Confirmed Binary FBX format for $fbx_candidate. Ready for native Blender import."
+              fi
+            fi
+          done
+
+          ls -la input_model.* inputs/ 2>/dev/null || echo "No uploaded 3D model detected. Running pure procedural pipeline."
+
+      # Step 5: Execute Blender Python Script with Auto-Repair, Input Model Ingestion & Motion Blur
+      - name: Execute Blender Python Script
+        env:
+          BPY_SCRIPT: ${{ github.event.client_payload.bpy_script }}
+          ASSET_ID: ${{ github.event.client_payload.asset_id }}
+          W1_STRUCTURE: ${{ github.event.client_payload.w1StructureScript || github.event.client_payload.w1HeroScript }}
+          W2_DETAILS: ${{ github.event.client_payload.w2DetailsScript || github.event.client_payload.w2EnvScript }}
+          W3_MATERIALS: ${{ github.event.client_payload.w3MaterialsScript || github.event.client_payload.w3LightScript }}
+          W4_CINEMATICS: ${{ github.event.client_payload.w4CinematicsScript }}
+        run: |
+          mkdir -p output
+          
+          python3 - << 'EOF'
+          import json, os, sys, re, base64, py_compile
+
+          event_path = os.environ.get('GITHUB_EVENT_PATH')
+          bpy_script = ''
+          w1 = ''
+          w2 = ''
+          w3 = ''
+          w4 = ''
+          payload = {}
+
+          if event_path and os.path.exists(event_path):
+              try:
+                  with open(event_path, 'r', encoding='utf-8') as ef:
+                      event_data = json.load(ef)
+                      payload = event_data.get('client_payload', {})
+                      
+                      input_model_b64 = payload.get('input_model_b64', '')
+                      if input_model_b64 and input_model_b64.strip():
+                          try:
+                              with open('input_model.glb', 'wb') as mf:
+                                  mf.write(base64.b64decode(input_model_b64))
+                              os.makedirs('inputs', exist_ok=True)
+                              with open('inputs/input_model.glb', 'wb') as mf2:
+                                  mf2.write(base64.b64decode(input_model_b64))
+                              print("Successfully unpacked user input 3D model: input_model.glb")
+                          except Exception as me:
+                              print(f"Warning unpacking user model: {me}")
+
+                      if 'bpy_script_b64' in payload and payload['bpy_script_b64'].strip():
+                          bpy_script = base64.b64decode(payload['bpy_script_b64']).decode('utf-8', errors='ignore')
+                      elif 'bpy_script' in payload:
+                          candidate = payload['bpy_script'].strip()
+                          if candidate.startswith('b64:'):
+                              bpy_script = base64.b64decode(candidate[4:]).decode('utf-8', errors='ignore')
+                          else:
+                              bpy_script = candidate
+                              
+                      w1 = payload.get('w1StructureScript', payload.get('w1HeroScript', ''))
+                      w2 = payload.get('w2DetailsScript', payload.get('w2EnvScript', ''))
+                      w3 = payload.get('w3MaterialsScript', payload.get('w3LightScript', ''))
+                      w4 = payload.get('w4CinematicsScript', '')
+              except Exception as e:
+                  print(f"Note on GITHUB_EVENT_PATH read: {e}")
+
+          # Fallback to environment variables
+          if not bpy_script:
+              env_s = os.environ.get('BPY_SCRIPT', '').strip()
+              if env_s.startswith('b64:'):
+                  try:
+                      bpy_script = base64.b64decode(env_s[4:]).decode('utf-8', errors='ignore')
+                  except Exception:
+                      bpy_script = env_s
+              else:
+                  bpy_script = env_s
+
+          if not w1: w1 = os.environ.get('W1_STRUCTURE', '')
+          if not w2: w2 = os.environ.get('W2_DETAILS', '')
+          if not w3: w3 = os.environ.get('W3_MATERIALS', '')
+          if not w4: w4 = os.environ.get('W4_CINEMATICS', '')
+
+          # Assemble dynamic modular scripts if provided separately
+          if not bpy_script.strip() and (w1.strip() or w2.strip() or w3.strip() or w4.strip()):
+              bpy_script = (
+                  "import bpy, os, math, random, sys, traceback\n\n"
+                  "os.makedirs('output', exist_ok=True)\n"
+                  "bpy.ops.object.select_all(action='SELECT')\n"
+                  "bpy.ops.object.delete(use_global=False)\n\n"
+                  f"# --- W1: STRUCTURE ---\n{w1}\n\n"
+                  f"# --- W2: DETAILS & PROPS ---\n{w2}\n\n"
+                  f"# --- W3: PBR MATERIALS ---\n{w3}\n\n"
+                  f"# --- W4: LIGHTING & CAM ---\n{w4}\n"
+              )
+
+          if not bpy_script.strip():
+              err_msg = "FATAL ERROR: No Blender Python script provided in payload."
+              print(err_msg)
+              with open('output/error.txt', 'w', encoding='utf-8') as ef:
+                  ef.write(err_msg + '\n')
+              sys.exit(1)
+
+          # Determine whether an imported 3D asset model physically exists in the workspace
+          has_imported_model = (
+              os.path.exists('input_model.glb') or os.path.exists('inputs/input_model.glb') or
+              os.path.exists('input_model.fbx') or os.path.exists('inputs/input_model.fbx') or
+              os.path.exists('input_model.obj') or os.path.exists('inputs/input_model.obj') or
+              os.path.exists('input_model.gltf') or os.path.exists('inputs/input_model.gltf')
+          )
+
+          # Determine if this run is a standalone raw procedural script (strictly when NO model was imported)
+          pipeline_mode = str(payload.get('pipeline_mode', '')).upper()
+          is_explicit_option_a = (not has_imported_model) and (
+              bool(payload.get('is_raw_script')) or 
+              bool(payload.get('isRawUserScript')) or 
+              ('bpy_script_b64' in payload) or
+              (pipeline_mode == 'OPTION_A')
+          )
+
+          # Check if the script or model is explicitly about a vehicle/car
+          script_lower = bpy_script.lower()
+          is_vehicle_job = has_imported_model or any(k in script_lower for k in ['car_root', 'vehicle_chassis', 'r8', 'wheel_arch', 'highway_road', 'model_root', 'automotive'])
+
+          print(f"Vynara Pipeline Context: is_explicit_option_a={is_explicit_option_a}, has_imported_model={has_imported_model}, is_vehicle_job={is_vehicle_job}")
+
+          # CRITICAL FIX: Strip any early premature export calls from Gemini so model.glb is NEVER created before the road!
+          bpy_script = re.sub(r"bpy\.ops\.export_scene\.gltf\([^)]*\)", "print('Stripped early premature GLTF export.')", bpy_script)
+
+          # --- AST & REGEX AUTO-REPAIR PIPELINE ---
+
+          # Auto-Repair 1: Neutralize unstable headless addon registrations
+          bpy_script = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", bpy_script)
+
+          # Auto-Repair 2: Fix unquoted node lookups
+          bpy_script = re.sub(r'nodes\.get\(\s*([A-Za-z0-9_ ]+)\s*\)', lambda m: f'nodes.get("{m.group(1).strip()}")' if '"' not in m.group(1) and "'" not in m.group(1) else m.group(0), bpy_script)
+
+          # Auto-Repair 3: Fix unquoted f-strings
+          bpy_script = re.sub(r'(?<=[=\s,(])f([a-zA-Z0-9_]+\{[^}"\n]+\}[a-zA-Z0-9_]*)', r'f"\1"', bpy_script)
+
+          # Auto-Repair 4: Fix hallucinated operator names
+          bpy_script = bpy_script.replace(".primitive_cube_create(", ".primitive_cube_add(")
+          bpy_script = bpy_script.replace(".primitive_plane_create(", ".primitive_plane_add(")
+          bpy_script = bpy_script.replace(".primitive_cylinder_create(", ".primitive_cylinder_add(")
+          bpy_script = bpy_script.replace(".primitive_cone_create(", ".primitive_cone_add(")
+          bpy_script = bpy_script.replace(".primitive_uv_sphere_create(", ".primitive_uv_sphere_add(")
+          bpy_script = bpy_script.replace("bpy.ops.light.add(", "bpy.ops.object.light_add(")
+          bpy_script = bpy_script.replace("bpy.ops.camera.add(", "bpy.ops.object.camera_add(")
+          bpy_script = bpy_script.replace("bpy.ops.object.mesh.", "bpy.ops.mesh.")
+
+          # Auto-Repair 5: Blender 4.2+ Principled BSDF socket name updates
+          bpy_script = bpy_script.replace("['Transmission'].default_value", "['Transmission Weight'].default_value")
+          bpy_script = bpy_script.replace("['Subsurface'].default_value", "['Subsurface Weight'].default_value")
+          bpy_script = bpy_script.replace("['Specular'].default_value", "['Specular IOR Level'].default_value")
+          bpy_script = bpy_script.replace("['BaseColor']", "['Base Color']")
+          bpy_script = bpy_script.replace('["BaseColor"]', '["Base Color"]')
+          bpy_script = bpy_script.replace("'BLENDER_EEVEE'", "'CYCLES'")
+          bpy_script = bpy_script.replace('"BLENDER_EEVEE"', '"CYCLES"')
+          bpy_script = bpy_script.replace("'BLENDER_EEVEE_NEXT'", "'CYCLES'")
+          bpy_script = bpy_script.replace('"BLENDER_EEVEE_NEXT"', '"CYCLES"')
+
+          # Auto-Repair 6: Blender 4.2+ AgX Color Management Look Enums
+          look_fixes = [
+              (r"view_settings\.look\s*=\s*['\"]High Contrast['\"]", "view_settings.look = 'AgX - High Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Very High Contrast['\"]", "view_settings.look = 'AgX - Very High Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Medium High Contrast['\"]", "view_settings.look = 'AgX - Medium High Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Medium Low Contrast['\"]", "view_settings.look = 'AgX - Medium Low Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Low Contrast['\"]", "view_settings.look = 'AgX - Low Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Very Low Contrast['\"]", "view_settings.look = 'AgX - Very Low Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Base Contrast['\"]", "view_settings.look = 'AgX - Base Contrast'"),
+              (r"view_settings\.look\s*=\s*['\"]Punchy['\"]", "view_settings.look = 'AgX - Punchy'")
+          ]
+          for pattern, replacement in look_fixes:
+              bpy_script = re.sub(pattern, replacement, bpy_script)
+
+          # Auto-Repair 7: Wrap view_settings.look in try-except block
+          bpy_script = re.sub(
+              r"^([ \t]*)(.*view_settings\.look\s*=.*)$",
+              r"\1try:\n\1    \2\n\1except Exception as _look_err: print(f'View settings look notice: {_look_err}')",
+              bpy_script,
+              flags=re.MULTILINE
+          )
+
+          # Auto-Repair 8: Redirect FBX imports to GLTF if converted or if model exists as GLB
+          has_glb = os.path.exists('input_model.glb') or os.path.exists('inputs/input_model.glb')
+          if has_glb:
+              bpy_script = bpy_script.replace("bpy.ops.import_scene.fbx(", "bpy.ops.import_scene.gltf(")
+              bpy_script = re.sub(r"(['\"])([^'\"\n]*?)\.fbx(['\"])", r"\1\2.glb\3", bpy_script)
+              print("Auto-Repair: Successfully redirected scene FBX import to converted GLB format.")
+
+          # Auto-Repair 9: SCOPED Texture Type Fix
+          valid_tex = {'NONE', 'BLEND', 'CLOUDS', 'DISTORTED_NOISE', 'IMAGE', 'MAGIC', 'MARBLE', 'MUSGRAVE', 'NOISE', 'STUCCI', 'VORONOI', 'WOOD'}
+          def fix_texture_type(m):
+              prefix = m.group(1)
+              tex_val = m.group(2)
+              suffix = m.group(3)
+              if tex_val not in valid_tex:
+                  tex_val = 'CLOUDS'
+              return prefix + tex_val + suffix
+          bpy_script = re.sub(r"(textures\.new\([^)]*type\s*=\s*['\"])([A-Za-z0-9_]+)(['\"])", fix_texture_type, bpy_script)
+
+          # Auto-Repair 13: Fix Background shader socket name ('Color' -> 'Background')
+          bpy_script = re.sub(r"(\.outputs\[['\"])Color(['\"]\]\s*,\s*[^,\n]*?inputs\[['\"])Surface(['\"]\])", r"\1Background\2Surface\3", bpy_script)
+          bpy_script = re.sub(r"(bg(?:_node)?\\.outputs\[['\"])Color(['\"]\])", r"\1Background\2", bpy_script)
+
+          # Auto-Repair 14: Neutralize read-only sequencer_colorspace_settings assignment
+          bpy_script = re.sub(r"^[ \t]*.*?\.sequencer_colorspace_settings\s*=.*$", "pass", bpy_script, flags=re.MULTILINE)
+
+          # Auto-Repair 15: Fix scene.exposure -> scene.view_settings.exposure
+          bpy_script = re.sub(r"(\bscene)\.exposure\b", r"\1.view_settings.exposure", bpy_script)
+
+          # Auto-Repair 16: Additional Principled BSDF socket link protections
+          bpy_script = re.sub(r"inputs\[['\"]Transmission['\"]\]", "inputs['Transmission Weight']", bpy_script)
+          bpy_script = re.sub(r"inputs\[['\"]Subsurface['\"]\]", "inputs['Subsurface Weight']", bpy_script)
+          bpy_script = re.sub(r"inputs\[['\"]Specular['\"]\]", "inputs['Specular IOR Level']", bpy_script)
+
+          # Auto-Repair 17: Fix hallucinated object.keyframe_[xyz] axis attribute assignments
+          axis_index_map = {'x': 0, 'y': 1, 'z': 2, 'X': 0, 'Y': 1, 'Z': 2}
+          def fix_keyframe_axis(m):
+              obj = m.group(1)
+              axis = m.group(2)
+              val = m.group(3).strip()
+              idx = axis_index_map.get(axis, 1)
+              return f"{obj}.location.{axis.lower()} = {val}; {obj}.keyframe_insert(data_path='location', index={idx})"
+          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_([xyzXYZ])\s*=\s*([^\n;]+)", fix_keyframe_axis, bpy_script)
+
+          # Auto-Repair 18: Fix hallucinated object.keyframe_[location|rotation|scale] property assignments
+          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_location\s*=\s*([^\n;]+)", r"\1.location = \2; \1.keyframe_insert(data_path='location')", bpy_script)
+          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_rotation\s*=\s*([^\n;]+)", r"\1.rotation_euler = \2; \1.keyframe_insert(data_path='rotation_euler')", bpy_script)
+          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_scale\s*=\s*([^\n;]+)", r"\1.scale = \2; \1.keyframe_insert(data_path='scale')", bpy_script)
+
+          # Auto-Repair 19: Auto-heal f_mat variable typo (f_mat -> fog_mat)
+          bpy_script = re.sub(r"\bf_mat\b", "fog_mat", bpy_script)
+
+          # Auto-Repair 22: Auto-repair world.node_tree.nodes.link -> world.node_tree.links.new
+          bpy_script = re.sub(r"\.nodes\.link\(", ".links.new(", bpy_script)
+
+          # Auto-Repair 23: Auto-repair scene.render.shutter -> scene.render.motion_blur_shutter
+          bpy_script = re.sub(r"(\.render)\.shutter\b", r"\1.motion_blur_shutter", bpy_script)
+
+          # Auto-Repair 25: Neutralize cycles get_devices() NoneType crash & enforce headless CPU device
+          bpy_script = re.sub(
+              r"^[ \t]*.*cycles.*(?:device\s*=\s*['\"]GPU['\"]|get_devices\(\)).*$",
+              "try:\n    bpy.context.scene.cycles.device = 'CPU'\nexcept Exception: pass",
+              bpy_script,
+              flags=re.MULTILINE
+          )
+          bpy_script = bpy_script.replace("get_devices()", "(bpy.context.preferences.addons['cycles'].preferences.get_devices() or [])")
+
+          # Auto-Repair 26: Fix hallucinated nodes.ShaderNode* direct constructors
+          def fix_shader_node_constructor(m):
+              nodes_var = m.group(1)
+              node_type = m.group(2)
+              args = m.group(3).strip()
+              loc_match = re.search(r'location\s*=\s*(\([^)]+\))', args)
+              if loc_match:
+                  loc = loc_match.group(1)
+                  return f"({nodes_var}.new(type='{node_type}'), setattr({nodes_var}.new(type='{node_type}'), 'location', {loc}))[0]"
+              return f"{nodes_var}.new(type='{node_type}')"
+
+          bpy_script = re.sub(
+              r"([a-zA-Z0-9_]*nodes?)\.(ShaderNode[A-Za-z0-9_]+)\(([^)]*)\)",
+              fix_shader_node_constructor,
+              bpy_script
+          )
+
+          # -------------------------------------------------------------------------
+          # CONDITIONAL VEHICLE AUTO-REPAIRS: STRICTLY FOR VEHICLE SCENES
+          # (Executes for all imported models or vehicle jobs)
+          # -------------------------------------------------------------------------
+          if is_vehicle_job and not is_explicit_option_a:
+              print("Vynara Pipeline: Ingesting Vehicle Post-Processing (4.5m Scale, Ground Contact, Road, and Driving Rig)...")
+
+              # Auto-Repair 24 & 28: Baked Scale, Centered Ground Placement, 180-deg Yaw & Driving Animation
+              vehicle_root_block = (
+                  "\n\n# --- ROBUST VEHICLE ASSEMBLY NORMALIZER & DRIVING RIG ---\n"
+                  "try:\n"
+                  "    import mathutils, math, bpy\n"
+                  "    bpy.context.scene.frame_set(1)\n"
+                  "    _env_keys = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n"
+                  "    _car_meshes = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_keys)]\n"
+                  "    if _car_meshes:\n"
+                  "        # 0. Clear residual animation data on individual sub-meshes to prevent transform conflicts\n"
+                  "        for _m in _car_meshes:\n"
+                  "            if _m.animation_data:\n"
+                  "                _m.animation_data_clear()\n"
+                  "        # 1. Compute aggregate bounding box in world space\n"
+                  "        _min_x = min((_m.matrix_world @ mathutils.Vector(corner)).x for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _max_x = max((_m.matrix_world @ mathutils.Vector(corner)).x for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _min_y = min((_m.matrix_world @ mathutils.Vector(corner)).y for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _max_y = max((_m.matrix_world @ mathutils.Vector(corner)).y for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _min_z = min((_m.matrix_world @ mathutils.Vector(corner)).z for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _max_z = max((_m.matrix_world @ mathutils.Vector(corner)).z for _m in _car_meshes for corner in _m.bound_box)\n"
+                  "        _car_length = max(_max_x - _min_x, _max_y - _min_y)\n"
+                  "        _scale_factor = (4.5 / _car_length) if _car_length > 0.001 else 1.0\n"
+                  "        _cx = (_min_x + _max_x) * 0.5\n"
+                  "        _cy = (_min_y + _max_y) * 0.5\n"
+                  "        _cz = _min_z\n"
+                  "        # 2. Directly bake 4.5m scale, origin centering, 180-deg yaw forward facing (+Y), and ground snap to meshes\n"
+                  "        for _m in _car_meshes:\n"
+                  "            _m.location.x = (_m.location.x - _cx) * _scale_factor\n"
+                  "            _m.location.y = (_m.location.y - _cy) * _scale_factor\n"
+                  "            _m.location.z = (_m.location.z - _cz) * _scale_factor\n"
+                  "            _m.scale = (_m.scale.x * _scale_factor, _m.scale.y * _scale_factor, _m.scale.z * _scale_factor)\n"
+                  "            _m.rotation_euler.z += math.pi\n"
+                  "            bpy.context.view_layer.objects.active = _m\n"
+                  "            bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)\n"
+                  "        # 3. Create Model_Root at clean unit scale (1,1,1) flush at ground (Z=0.0)\n"
+                  "        _root = bpy.data.objects.get('Model_Root')\n"
+                  "        if not _root:\n"
+                  "            _root = bpy.data.objects.new('Model_Root', None)\n"
+                  "            _root.empty_display_type = 'PLAIN_AXES'\n"
+                  "            bpy.context.collection.objects.link(_root)\n"
+                  "        _root.animation_data_clear()\n"
+                  "        _root.location = (0.0, 0.0, 0.0)\n"
+                  "        _root.rotation_euler = (0.0, 0.0, 0.0)\n"
+                  "        _root.scale = (1.0, 1.0, 1.0)\n"
+                  "        bpy.context.view_layer.update()\n"
+                  "        for _m in _car_meshes:\n"
+                  "            _m.parent = _root\n"
+                  "            _m.matrix_parent_inverse = _root.matrix_world.inverted()\n"
+                  "        # 4. Driving Animation along Y: starts at Y=15.0 with runway ahead, drives to Y=95.0\n"
+                  "        bpy.context.scene.frame_start = 1\n"
+                  "        bpy.context.scene.frame_end = 60\n"
+                  "        _root.location = (0.0, 15.0, 0.0)\n"
+                  "        _root.keyframe_insert(data_path='location', frame=1)\n"
+                  "        _root.location = (0.0, 95.0, 0.0)\n"
+                  "        _root.keyframe_insert(data_path='location', frame=60)\n"
+                  "        if _root.animation_data and _root.animation_data.action:\n"
+                  "            for _fc in _root.animation_data.action.fcurves:\n"
+                  "                for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
+                  "        # 5. Bake wheel spin per frame (1->60) to prevent quaternion slerp jitter\n"
+                  "        _wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n"
+                  "        _wheel_objs = [m for m in _car_meshes if any(wk in m.name.lower() for wk in _wheel_keys)]\n"
+                  "        for _w in _wheel_objs:\n"
+                  "            _w.rotation_mode = 'XYZ'\n"
+                  "            _w.animation_data_clear()\n"
+                  "            for _f in range(1, 61):\n"
+                  "                _progress = (_f - 1) / 59.0\n"
+                  "                _w.rotation_euler.x = (214.28 * _progress)\n"
+                  "                _w.keyframe_insert(data_path='rotation_euler', frame=_f)\n"
+                  "            if _w.animation_data and _w.animation_data.action:\n"
+                  "                for _fc in _w.animation_data.action.fcurves:\n"
+                  "                    for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
+                  "        print('Vehicle Rig: Normalized to 4.5m length, baked Z=0 flush, animated Y 15m->95m')\n"
+                  "except Exception as _veh_err: print(f'Vehicle rig note: {_veh_err}')\n"
+              )
+              bpy_script += vehicle_root_block
+
+              # Auto-Repair 27: Road & Lane Markings (Only for Vehicle Scenes)
+              road_clamp_snippet = (
+                  "\n\n# --- MULTI-LANE HIGHWAY ROAD & LANE MARKINGS ---\n"
+                  "try:\n"
+                  "    _road_obj = None\n"
+                  "    for _o in list(bpy.data.objects):\n"
+                  "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['road', 'highway', 'asphalt']):\n"
+                  "            _road_obj = _o; break\n"
+                  "    if not _road_obj:\n"
+                  "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, -0.01))\n"
+                  "        _road_obj = bpy.context.active_object\n"
+                  "        _road_obj.name = 'Highway_Road'\n"
+                  "    _road_obj.location = (0.0, 125.0, -0.01)\n"
+                  "    _road_obj.rotation_euler = (0.0, 0.0, 0.0)\n"
+                  "    _road_obj.dimensions = (14.0, 250.0, 0.0)\n"
+                  "    bpy.context.view_layer.objects.active = _road_obj\n"
+                  "    bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)\n"
+                  "    for _o in list(bpy.data.objects):\n"
+                  "        if _o.type == 'MESH' and any(k in _o.name.lower() for k in ['stripe', 'lane', 'marking', 'dash']):\n"
+                  "            bpy.data.objects.remove(_o, do_unlink=True)\n"
+                  "    _dash_mat = bpy.data.materials.new(name='Lane_Marking_Mat')\n"
+                  "    _dash_mat.use_nodes = True\n"
+                  "    _d_bsdf = _dash_mat.node_tree.nodes.get('Principled BSDF')\n"
+                  "    if _d_bsdf:\n"
+                  "        _d_bsdf.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)\n"
+                  "        _d_bsdf.inputs['Roughness'].default_value = 0.2\n"
+                  "    for _idx in range(1, 40):\n"
+                  "        _dy = _idx * 6.0\n"
+                  "        if _dy > 245.0: break\n"
+                  "        bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, _dy, 0.005))\n"
+                  "        _d = bpy.context.active_object\n"
+                  "        _d.name = f'Lane_Dash_{_idx}'\n"
+                  "        _d.rotation_euler = (0.0, 0.0, 0.0)\n"
+                  "        _d.dimensions = (0.2, 3.0, 0.0)\n"
+                  "        if _d.data.materials: _d.data.materials[0] = _dash_mat\n"
+                  "        else: _d.data.materials.append(_dash_mat)\n"
+                  "except Exception as _rc_err: print(f'Road generation note: {_rc_err}')\n"
+              )
+              bpy_script += road_clamp_snippet
+
+              # Auto-Repair 29: Vehicle World Tracking Camera & Key Sunlight Illumination
+              # (Camera moves in world coordinates along Y at 3/4 chase offset, never parented to avoid scaling issues)
+              vehicle_lighting_camera = (
+                  "\n\n# --- VEHICLE WORLD TRACKING CAMERA & DAYLIGHT SUN ILLUMINATION ---\n"
+                  "try:\n"
+                  "    import mathutils, math, bpy\n"
+                  "    _root = bpy.data.objects.get('Model_Root')\n"
+                  "    _cam = bpy.context.scene.camera\n"
+                  "    if not _cam:\n"
+                  "        _cam_data = bpy.data.cameras.new('TrackingCam')\n"
+                  "        _cam = bpy.data.objects.new('TrackingCam', _cam_data)\n"
+                  "        bpy.context.collection.objects.link(_cam)\n"
+                  "        bpy.context.scene.camera = _cam\n"
+                  "    _cam.parent = None\n"
+                  "    _cam.scale = (1.0, 1.0, 1.0)\n"
+                  "    _cam.data.lens = 35.0\n"
+                  "    _cam.animation_data_clear()\n"
+                  "    _cam.constraints.clear()\n"
+                  "    # Animate camera tracking car along Y: from Y=8.0 (frame 1) to Y=88.0 (frame 60)\n"
+                  "    _cam.location = (-3.8, 8.0, 2.0)\n"
+                  "    _cam.keyframe_insert(data_path='location', frame=1)\n"
+                  "    _cam.location = (-3.8, 88.0, 2.0)\n"
+                  "    _cam.keyframe_insert(data_path='location', frame=60)\n"
+                  "    if _cam.animation_data and _cam.animation_data.action:\n"
+                  "        for _fc in _cam.animation_data.action.fcurves:\n"
+                  "            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n"
+                  "    if _root:\n"
+                  "        _track = _cam.constraints.new(type='TRACK_TO')\n"
+                  "        _track.target = _root\n"
+                  "        _track.track_axis = 'TRACK_NEGATIVE_Z'\n"
+                  "        _track.up_axis = 'UP_Y'\n"
+                  "    # Add Key Sun & Ambient Sky Radiance\n"
+                  "    _sun = bpy.data.objects.get('Sun_Light')\n"
+                  "    if not _sun:\n"
+                  "        _sdata = bpy.data.lights.new(name='Sun_Light', type='SUN')\n"
+                  "        _sdata.energy = 6.0\n"
+                  "        _sdata.color = (1.0, 0.98, 0.92)\n"
+                  "        _sun = bpy.data.objects.new(name='Sun_Light', object_data=_sdata)\n"
+                  "        bpy.context.collection.objects.link(_sun)\n"
+                  "        _sun.rotation_euler = (math.radians(50.0), math.radians(15.0), math.radians(-35.0))\n"
+                  "    if bpy.context.scene.world and bpy.context.scene.world.node_tree:\n"
+                  "        _bg = bpy.context.scene.world.node_tree.nodes.get('Background')\n"
+                  "        if _bg:\n"
+                  "            _bg.inputs['Color'].default_value = (0.65, 0.82, 1.0, 1.0)\n"
+                  "            _bg.inputs['Strength'].default_value = 1.2\n"
+                  "except Exception as _vcam_err: print(f'Vehicle camera/lighting note: {_vcam_err}')\n"
+              )
+              bpy_script += vehicle_lighting_camera
+          else:
+              print("Vynara Pipeline: Option A / Non-vehicle job detected. Bypassing car normalizer, road, and driving rig.")
+
+          # Auto-Repair 10: Animation-Safe GLTF/GLB Exporter (Always executed AFTER scene props and road are created)
+          final_export_snippet = (
+              "\n\n# --- FINAL COMPLETE SCENE GLTF/GLB EXPORTER ---\n"
+              "import bpy, os\n"
+              "os.makedirs('output', exist_ok=True)\n"
+              "try:\n"
+              "    for _o in list(bpy.data.objects):\n"
+              "        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n"
+              "            bpy.data.objects.remove(_o, do_unlink=True)\n"
+              "    bpy.ops.export_scene.gltf(\n"
+              "        filepath='output/model.glb',\n"
+              "        export_format='GLB',\n"
+              "        export_apply=False,\n"
+              "        export_skins=True,\n"
+              "        export_animations=True,\n"
+              "        export_materials='EXPORT'\n"
+              "    )\n"
+              "    print('3D GLTF Export Successful: output/model.glb (Road, Vehicle & Rig Committed)')\n"
+              "except Exception as ge: print(f'GLTF export warning: {ge}')\n"
+          )
+          bpy_script += final_export_snippet
+
+          # Auto-Repair 11: Production Snapshot Framing (Always Single Frame Preview - Rendered at Frame 1 where Car is visible)
+          if 'output/render.png' not in bpy_script:
+              bpy_script += (
+                  "\n\n# Production Snapshot Frame (Fast Headless Preview at Frame 1)\n"
+                  "try:\n"
+                  "    import os, math, bpy\n"
+                  "    bpy.context.scene.frame_set(1)\n"
+                  "    _cam = bpy.context.scene.camera\n"
+                  "    if not _cam:\n"
+                  "        _cam_data = bpy.data.cameras.new('CinematicCamera')\n"
+                  "        _cam = bpy.data.objects.new('CinematicCamera', _cam_data)\n"
+                  "        bpy.context.collection.objects.link(_cam)\n"
+                  "        bpy.context.scene.camera = _cam\n"
+                  "        _cam.location = (-3.8, 8.0, 2.0)\n"
+                  "        _cam.rotation_euler = (math.radians(70), 0, math.radians(-15))\n"
+                  "    bpy.context.scene.render.engine = 'CYCLES'\n"
+                  "    bpy.context.scene.cycles.device = 'CPU'\n"
+                  "    bpy.context.scene.cycles.samples = 4\n"
+                  "    bpy.context.scene.cycles.max_bounces = 4\n"
+                  "    bpy.context.scene.cycles.diffuse_bounces = 2\n"
+                  "    bpy.context.scene.cycles.glossy_bounces = 2\n"
+                  "    bpy.context.scene.cycles.transmission_bounces = 2\n"
+                  "    bpy.context.scene.cycles.transparent_max_bounces = 4\n"
+                  "    bpy.context.scene.cycles.use_denoising = False\n"
+                  "    bpy.context.scene.render.resolution_x = 960\n"
+                  "    bpy.context.scene.render.resolution_y = 540\n"
+                  "    bpy.context.scene.render.filepath = 'output/render.png'\n"
+                  "    bpy.ops.render.render(write_still=True)\n"
+                  "    print('Production Cycles snapshot complete: output/render.png')\n"
+                  "except Exception as snap_e: print(f'Snapshot generation note: {snap_e}')\n"
+              )
+
+          # Auto-Repair 21: CONDITIONAL Animation Video Exporter
+          anim_render_snippet = (
+              "\n\n# Dynamic Animation Video Exporter (Only for scenes with actual keyframes)\n"
+              "try:\n"
+              "    import bpy, os\n"
+              "    _sc = bpy.context.scene\n"
+              "    _has_real_anim = any(\n"
+              "        (obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0)\n"
+              "        for obj in bpy.data.objects\n"
+              "    )\n"
+              "    if _has_real_anim and _sc.camera and not os.path.exists('output/cinematic.mp4'):\n"
+              "        if (_sc.frame_end - _sc.frame_start) > 60:\n"
+              "            _sc.frame_end = _sc.frame_start + 60\n"
+              "        print(f'Active Animation Detected: Rendering MP4 sequence frames {_sc.frame_start} to {_sc.frame_end}...')\n"
+              "        _sc.render.resolution_x = 960\n"
+              "        _sc.render.resolution_y = 540\n"
+              "        _sc.render.image_settings.file_format = 'FFMPEG'\n"
+              "        _sc.render.ffmpeg.format = 'MPEG4'\n"
+              "        _sc.render.ffmpeg.codec = 'H264'\n"
+              "        _sc.render.ffmpeg.constant_rate_factor = 'MEDIUM'\n"
+              "        _sc.render.ffmpeg.ffmpeg_preset = 'REALTIME'\n"
+              "        _sc.render.filepath = 'output/cinematic.mp4'\n"
+              "        _sc.render.engine = 'CYCLES'\n"
+              "        _sc.cycles.device = 'CPU'\n"
+              "        _sc.cycles.samples = 2\n"
+              "        _sc.cycles.max_bounces = 3\n"
+              "        _sc.cycles.use_denoising = False\n"
+              "        bpy.ops.render.render(animation=True)\n"
+              "        print('Cinematic MP4 video rendered successfully: output/cinematic.mp4')\n"
+              "    else:\n"
+              "        print('Static Scene: No keyframe animation found. Skipping MP4 animation render to avoid delay.')\n"
+              "except Exception as _anim_err: print(f'Cinematic video export note: {_anim_err}')\n"
+          )
+          bpy_script += anim_render_snippet
+
+          # Auto-Repair 12: Project State Checkpoint for Option B2 Interactive Sessions
+          if 'bpy.ops.wm.save_as_mainfile' not in bpy_script:
+              bpy_script += (
+                  "\n\n# Save Checkpoint Project for Interactive Iteration\n"
+                  "try:\n"
+                  "    import bpy\n"
+                  "    bpy.ops.wm.save_as_mainfile(filepath='output/project.blend')\n"
+                  "    print('Saved project checkpoint: output/project.blend')\n"
+                  "except Exception as pe: print(f'Blend save note: {pe}')\n"
+              )
+
+          with open('run_task.py', 'w', encoding='utf-8') as f:
+              f.write(bpy_script)
+
+          try:
+              py_compile.compile('run_task.py', doraise=True)
+              print("Python Syntax Pre-Check: PASSED")
+          except py_compile.PyCompileError as pe:
+              print(f"Syntax Validation Warning: {pe}")
+
+          EOF
+
+          # Run headless Blender wrapped inside virtual X display buffer for full OpenGL shader compilation
+          xvfb-run -a --server-args="-screen 0 1920x1080x24 -ac +extension GLX +render" /opt/blender/blender -b -P run_task.py 2>&1 | tee output/blender_execution.log || true
+
+          # Extract clean Python traceback for Solution B if any exception occurred
+          python3 - << 'EOF'
+          import re, os
+          if os.path.exists('output/blender_execution.log'):
+              with open('output/blender_execution.log', 'r', encoding='utf-8', errors='ignore') as lf:
+                  content = lf.read()
+              
+              tb_match = re.search(r'(Traceback \(most recent call last\):[\s\S]+?(?:[A-Za-z0-9_]+Error|[A-Za-z0-9_]+Exception):[^\n]+)', content)
+              if tb_match:
+                  traceback_str = tb_match.group(1).strip()
+                  with open('output/error.txt', 'w', encoding='utf-8') as ef:
+                      ef.write(traceback_str + '\n')
+                  print("EXTRACTED TRACEBACK TO error.txt:\n" + traceback_str)
+          EOF
+
+          # Normalize any exported .glb to model.glb so the Android app can consume it
+          if [ ! -f output/model.glb ]; then
+            FIRST_GLB=$(ls output/*.glb 2>/dev/null | head -n 1)
+            if [ -n "$FIRST_GLB" ]; then
+              cp "$FIRST_GLB" output/model.glb
+              echo "Normalized $FIRST_GLB -> output/model.glb"
+            fi
+          fi
+
+          # Normalize any rendered .mp4 to cinematic.mp4
+          if [ ! -f output/cinematic.mp4 ]; then
+            FIRST_MP4=$(ls output/*.mp4 2>/dev/null | head -n 1)
+            if [ -n "$FIRST_MP4" ]; then
+              cp "$FIRST_MP4" output/cinematic.mp4
+              echo "Normalized $FIRST_MP4 -> output/cinematic.mp4"
+            fi
+          fi
+
+          # Verify output assets
+          if [ -f output/model.glb ]; then
+            echo "SUCCESS: model.glb generated successfully."
+            if [ -f output/cinematic.mp4 ]; then
+              echo "SUCCESS: cinematic.mp4 video generated successfully ($(stat -c%s output/cinematic.mp4) bytes)."
+            fi
+            exit 0
+          else
+            if [ ! -f output/error.txt ]; then
+              echo "ERROR: Blender execution halted without generating model.glb" > output/error.txt
+              tail -n 40 output/blender_execution.log >> output/error.txt
+            fi
+            exit 1
+          fi
+
+      # Step 6: Upload both GLB model, Cycles render, Cinematic MP4 video, and execution logs
+      - name: Upload Finished Model and Render Preview
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.client_payload.asset_id || 'vynara-artifact' }}
+          path: output/
+          retention-days: 3
+          if-no-files-found: warn
