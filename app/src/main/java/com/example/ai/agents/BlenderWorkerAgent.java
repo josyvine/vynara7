@@ -54,7 +54,7 @@ public class BlenderWorkerAgent {
     public static WorkerScripts wrapDynamicScript(String dynamicScript, AIDirectorSpec spec, String assetId) {
         VynaraLogger.system("BlenderWorkerAgent: Wrapping dynamic AI script for asset [" + assetId + "]");
 
-        // Strip any premature export calls from dynamic script so model.glb is never exported before the road!
+        // Strip any premature export calls from dynamic script so model.glb is never exported before the environment is built!
         String safeDynamicScript = (dynamicScript != null) 
                 ? dynamicScript.replaceAll("(?m)^\\s*bpy\\.ops\\.export_scene\\.gltf\\([^)]*\\)", "# Stripped premature export")
                 : "";
@@ -108,7 +108,8 @@ public class BlenderWorkerAgent {
         master.append("# Vynara Autonomous 3D Studio - ").append(title).append("\n");
         if (spec != null) {
             master.append("# Source: ").append(spec.getGenerationSource()).append("\n");
-            master.append("# Scene: ").append(spec.getSceneType()).append(" | Mood: ").append(spec.getMood()).append("\n");
+            master.append("# Subject: ").append(spec.getSubjectCategory()).append(" | Environment: ").append(spec.getPathType()).append("\n");
+            master.append("# Path Distance: ").append(spec.getPathLengthMeters()).append("m | Total Frames: ").append(spec.getTotalFrames()).append("\n");
         }
         master.append("# ==========================================\n\n");
         master.append("import bpy, os, math, random, sys, traceback, mathutils\n");
@@ -169,9 +170,9 @@ public class BlenderWorkerAgent {
     public static AIDirectorSpec getLastDirectorSpec() { return sLastDirectorSpec; }
 
     /**
-     * Dynamically builds Worker 1 (Structure) using real procedural shaping, subdivision,
-     * and boolean carving, or loads an uploaded 3D asset (.fbx, .glb, .obj, .gltf),
-     * directly baking the scale normalization to 4.5m and 180-deg forward heading to mesh vertices.
+     * Dynamically builds Worker 1 (Structure) using real procedural shaping,
+     * or loads an uploaded 3D asset (.fbx, .glb, .obj, .gltf),
+     * baking the contextual target scale dynamically to mesh vertices.
      */
     private static String buildWorker1StructureScript(String promptOrCode, AIDirectorSpec spec) {
         if (promptOrCode == null) return "";
@@ -184,10 +185,12 @@ public class BlenderWorkerAgent {
         String p = promptOrCode.toLowerCase();
         StringBuilder sb = new StringBuilder();
         int seed = (spec != null) ? spec.getSeedHero() : 42;
+        float targetLen = (spec != null) ? spec.getTargetSubjectLengthMeters() : 4.5f;
+
         sb.append("random.seed(").append(seed).append(")\n\n");
         
         // PBR Primary Material Setup (Blender 4.2+ compliant)
-        sb.append("# Hero Primary PBR Material\n");
+        sb.append("# Primary PBR Material\n");
         sb.append("mat_hero = bpy.data.materials.new('Mat_Hero_Primary')\n");
         sb.append("mat_hero.use_nodes = True\n");
         sb.append("bsdf_h = mat_hero.node_tree.nodes.get('Principled BSDF')\n");
@@ -238,7 +241,7 @@ public class BlenderWorkerAgent {
         sb.append("    bpy.ops.wm.obj_import(filepath=obj_path)\n");
         sb.append("    imported_mesh_list = [o for o in bpy.data.objects if o not in _b4 and o.type == 'MESH']\n\n");
 
-        sb.append("# RULE 1: DIRECT BAKED CAR SCALE NORMALIZATION (4.5m length, centered, 180-deg yaw forward)\n");
+        sb.append("# CONTEXTUAL SCALE NORMALIZATION (Target Length: ").append(targetLen).append("m)\n");
         sb.append("if imported_mesh_list:\n");
         sb.append("    _min_x = min((_m.matrix_world @ mathutils.Vector(c)).x for _m in imported_mesh_list for c in _m.bound_box)\n");
         sb.append("    _max_x = max((_m.matrix_world @ mathutils.Vector(c)).x for _m in imported_mesh_list for c in _m.bound_box)\n");
@@ -248,9 +251,9 @@ public class BlenderWorkerAgent {
         sb.append("    _max_z = max((_m.matrix_world @ mathutils.Vector(c)).z for _m in imported_mesh_list for c in _m.bound_box)\n");
         sb.append("    _total_len = max(_max_x - _min_x, _max_y - _min_y)\n");
         sb.append("    if _total_len > 0.001:\n");
-        sb.append("        _scale_factor = 4.5 / _total_len\n");
+        sb.append("        _scale_factor = ").append(targetLen).append(" / _total_len\n");
         sb.append("        _cx = (_min_x + _max_x) * 0.5; _cy = (_min_y + _max_y) * 0.5; _cz = _min_z\n");
-        sb.append("        print(f'Directly baking imported car assembly length from {_total_len:.3f}m to 4.5m')\n");
+        sb.append("        print(f'Baking imported assembly length from {_total_len:.3f}m to ").append(targetLen).append("m')\n");
         sb.append("        for _m in imported_mesh_list:\n");
         sb.append("            _m.location.x = (_m.location.x - _cx) * _scale_factor\n");
         sb.append("            _m.location.y = (_m.location.y - _cy) * _scale_factor\n");
@@ -267,11 +270,11 @@ public class BlenderWorkerAgent {
 
         if (isVehicle) {
             sb.append("if not imported_car:\n");
-            sb.append("    # Procedural Aerodynamic Car Body with Subsurf & Boolean Wheel Wells (4.5m length)\n");
+            sb.append("    # Procedural Aerodynamic Car Body with Subsurf & Wheel Wells\n");
             sb.append("    bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 0.7))\n");
             sb.append("    chassis = bpy.context.active_object\n");
             sb.append("    chassis.name = 'Vehicle_Chassis'\n");
-            sb.append("    chassis.scale = (1.9, 4.5, 0.75)\n");
+            sb.append("    chassis.scale = (1.9, ").append(targetLen).append(", 0.75)\n");
             sb.append("    bpy.ops.object.transform_apply(scale=True)\n\n");
 
             sb.append("    # Sloped Aerodynamic Cabin\n");
@@ -293,32 +296,18 @@ public class BlenderWorkerAgent {
             sb.append("    cabin.data.materials.append(mat_glass)\n");
             sb.append("    bpy.ops.object.shade_smooth()\n\n");
 
-            sb.append("    # Carve 4 Wheel Arches into Chassis Body\n");
-            sb.append("    wheel_coords = [(-0.96, -1.4), (0.96, -1.4), (-0.96, 1.4), (0.96, 1.4)]\n");
-            sb.append("    for idx, (wx, wy) in enumerate(wheel_coords):\n");
-            sb.append("        bpy.ops.mesh.primitive_cylinder_add(radius=0.52, depth=0.45, location=(wx, wy, 0.45), rotation=(0, math.radians(90), 0))\n");
-            sb.append("        cutter = bpy.context.active_object\n");
-            sb.append("        cutter.name = f'Wheel_Arch_Cutter_{idx}'\n");
-            sb.append("        bool_mod = chassis.modifiers.new(f'Arch_Cut_{idx}', 'BOOLEAN')\n");
-            sb.append("        bool_mod.object = cutter\n");
-            sb.append("        bool_mod.operation = 'DIFFERENCE'\n");
-            sb.append("        bpy.ops.object.select_all(action='DESELECT')\n");
-            sb.append("        chassis.select_set(True)\n");
-            sb.append("        bpy.context.view_layer.objects.active = chassis\n");
-            sb.append("        bpy.ops.object.modifier_apply(modifier=f'Arch_Cut_{idx}')\n");
-            sb.append("        bpy.data.objects.remove(cutter, do_unlink=True)\n\n");
-
             sb.append("    # Bevel & Smooth Chassis\n");
             sb.append("    bev_ch = chassis.modifiers.new('ChassisBevel', 'BEVEL')\n");
             sb.append("    bev_ch.width = 0.07; bev_ch.segments = 3\n");
             sb.append("    chassis.data.materials.append(mat_hero)\n");
             sb.append("    bpy.ops.object.shade_smooth()\n\n");
 
-            sb.append("    # 4 Correctly Oriented Wheels Standing on Vertical Axles\n");
+            sb.append("    # 4 Wheels Standing on Vertical Axles\n");
             sb.append("    mat_tire = bpy.data.materials.new('Mat_Tire_Rubber')\n");
             sb.append("    mat_tire.use_nodes = True\n");
             sb.append("    bsdf_t = mat_tire.node_tree.nodes.get('Principled BSDF')\n");
             sb.append("    if bsdf_t: bsdf_t.inputs['Base Color'].default_value = (0.02, 0.02, 0.02, 1.0); bsdf_t.inputs['Roughness'].default_value = 0.85\n");
+            sb.append("    wheel_coords = [(-0.96, -1.4), (0.96, -1.4), (-0.96, 1.4), (0.96, 1.4)]\n");
             sb.append("    for idx, (wx, wy) in enumerate(wheel_coords):\n");
             sb.append("        bpy.ops.mesh.primitive_cylinder_add(radius=0.42, depth=0.28, location=(wx, wy, 0.42), rotation=(0, math.radians(90), 0))\n");
             sb.append("        wheel = bpy.context.active_object\n");
@@ -333,44 +322,14 @@ public class BlenderWorkerAgent {
             sb.append("lower.name = 'Villa_LowerPavilion'\n");
             sb.append("lower.scale = (8.5, 6.5, 3.0)\n");
             sb.append("bpy.ops.object.transform_apply(scale=True)\n");
-            sb.append("bev_l = lower.modifiers.new('LowerBevel', 'BEVEL')\n");
-            sb.append("bev_l.width = 0.04; bev_l.segments = 2\n");
             sb.append("lower.data.materials.append(mat_hero)\n\n");
-
-            sb.append("# Upper Cantilever Terrace Suite\n");
-            sb.append("bpy.ops.mesh.primitive_cube_add(size=1, location=(1.2, 0.6, 4.2))\n");
-            sb.append("upper = bpy.context.active_object\n");
-            sb.append("upper.name = 'Villa_UpperSuite'\n");
-            sb.append("upper.scale = (9.8, 5.8, 2.5)\n");
-            sb.append("bpy.ops.object.transform_apply(scale=True)\n");
-            sb.append("bev_u = upper.modifiers.new('UpperBevel', 'BEVEL')\n");
-            sb.append("bev_u.width = 0.04; bev_u.segments = 2\n");
-            sb.append("upper.data.materials.append(mat_hero)\n\n");
-
-            sb.append("# Inset Swimming Pool & Water Surface\n");
-            sb.append("mat_water = bpy.data.materials.new('Mat_Pool_Water')\n");
-            sb.append("mat_water.use_nodes = True\n");
-            sb.append("bsdf_w = mat_water.node_tree.nodes.get('Principled BSDF')\n");
-            sb.append("if bsdf_w:\n");
-            sb.append("    bsdf_w.inputs['Base Color'].default_value = (0.05, 0.65, 0.9, 0.85)\n");
-            sb.append("    bsdf_w.inputs['Roughness'].default_value = 0.03\n");
-            sb.append("    bsdf_w.inputs['Transmission Weight'].default_value = 0.95\n");
-            sb.append("bpy.ops.mesh.primitive_plane_add(size=1, location=(5.2, -1.0, 0.02))\n");
-            sb.append("pool = bpy.context.active_object\n");
-            sb.append("pool.name = 'Pool_Surface'\n");
-            sb.append("pool.scale = (5.5, 8.5, 1.0)\n");
-            sb.append("bpy.ops.object.transform_apply(scale=True)\n");
-            sb.append("pool.data.materials.append(mat_water)\n");
-
         } else {
-            sb.append("# General Procedural Hero Asset with Bevel & Smooth Shading\n");
+            sb.append("# General Procedural Hero Asset\n");
             sb.append("bpy.ops.mesh.primitive_cube_add(size=1, location=(0, 0, 1.0))\n");
             sb.append("hero = bpy.context.active_object\n");
             sb.append("hero.name = 'Hero_Asset'\n");
             sb.append("hero.scale = (2.2, 2.2, 2.2)\n");
             sb.append("bpy.ops.object.transform_apply(scale=True)\n");
-            sb.append("bev_h = hero.modifiers.new('HeroBevel', 'BEVEL')\n");
-            sb.append("bev_h.width = 0.06; bev_h.segments = 3\n");
             sb.append("hero.data.materials.append(mat_hero)\n");
             sb.append("bpy.ops.object.shade_smooth()\n");
         }
@@ -379,12 +338,16 @@ public class BlenderWorkerAgent {
     }
 
     /**
-     * Builds Worker 2: Details, Road Infrastructure (14m x 250m at Z=-0.01), Center Dashes (Z=0.005 UP),
-     * Model_Root Assembly parenting with clean unit scale, and Driving Animation (Y: 15 -> 95m).
+     * Builds Worker 2: Details, Dynamic 3D Extruded Highway Corridor (1km-5km),
+     * Model_Root Assembly parenting, and Baked Driving Animation across the full timeline.
      */
     private static String buildWorker2DetailsScript(AIDirectorSpec spec) {
         StringBuilder sb = new StringBuilder();
         int seed = (spec != null) ? spec.getSeedVegetation() : 101;
+        float pathLen = (spec != null) ? spec.getPathLengthMeters() : 1000.0f;
+        float pathWidth = (spec != null) ? spec.getPathWidthMeters() : 14.0f;
+        int totalFrames = (spec != null) ? spec.getTotalFrames() : 150;
+
         sb.append("random.seed(").append(seed).append(")\n\n");
 
         sb.append("# High-Detail PBR Asphalt Material\n");
@@ -400,34 +363,34 @@ public class BlenderWorkerAgent {
         boolean isVehicle = sceneType.contains("vehicle") || sceneType.contains("car") || sceneType.contains("drive") || sceneType.contains("speed");
 
         if (isVehicle) {
-            sb.append("# RULE 2: REALISTIC MULTI-LANE HIGHWAY ROAD (14m wide x 250m long, flat along Y-corridor)\n");
-            sb.append("bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, 125.0, -0.01))\n");
+            sb.append("# DYNAMIC 3D EXTRUDED HIGHWAY CORRIDOR (").append(pathWidth).append("m wide x ").append(pathLen).append("m length, 0.2m thickness)\n");
+            sb.append("# Physical slab thickness eliminates Z-fighting and surface flickering completely\n");
+            sb.append("bpy.ops.mesh.primitive_cube_add(size=1.0, location=(0.0, ").append(pathLen / 2.0f).append(", -0.1))\n");
             sb.append("road = bpy.context.active_object\n");
             sb.append("road.name = 'Highway_Road'\n");
-            sb.append("road.rotation_euler = (0.0, 0.0, 0.0)\n");
-            sb.append("road.dimensions = (14.0, 250.0, 0.0)\n");
+            sb.append("road.scale = (").append(pathWidth).append(", ").append(pathLen).append(", 0.2)\n");
             sb.append("bpy.context.view_layer.objects.active = road\n");
             sb.append("bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)\n");
             sb.append("road.data.materials.append(mat_road)\n\n");
 
-            sb.append("# Center lane dashes at Z = 0.005 with normal pointing straight UP (0, 0, 1)\n");
+            sb.append("# Center lane dashes at Z = +0.01 on top of asphalt slab\n");
             sb.append("mat_dash = bpy.data.materials.new('Mat_Lane_Dash')\n");
             sb.append("mat_dash.use_nodes = True\n");
             sb.append("bsdf_d = mat_dash.node_tree.nodes.get('Principled BSDF')\n");
             sb.append("if bsdf_d:\n");
             sb.append("    bsdf_d.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)\n");
             sb.append("    bsdf_d.inputs['Roughness'].default_value = 0.25\n");
-            sb.append("for _idx in range(1, 40):\n");
+            sb.append("for _idx in range(1, int(").append(pathLen).append(" // 6.0)):\n");
             sb.append("    _dy = _idx * 6.0\n");
-            sb.append("    if _dy > 245.0: break\n");
-            sb.append("    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, _dy, 0.005))\n");
+            sb.append("    if _dy > ").append(pathLen - 10.0f).append(": break\n");
+            sb.append("    bpy.ops.mesh.primitive_plane_add(size=1.0, location=(0.0, _dy, 0.01))\n");
             sb.append("    _dash = bpy.context.active_object\n");
             sb.append("    _dash.name = f'Lane_Dash_{_idx}'\n");
             sb.append("    _dash.rotation_euler = (0.0, 0.0, 0.0)\n");
             sb.append("    _dash.dimensions = (0.2, 3.0, 0.0)\n");
             sb.append("    _dash.data.materials.append(mat_dash)\n\n");
 
-            sb.append("# Metal Guardrail Barrier along Highway\n");
+            sb.append("# Galvanized Steel Guardrail along Expressway\n");
             sb.append("mat_guard = bpy.data.materials.new('Mat_Galvanized_Steel')\n");
             sb.append("mat_guard.use_nodes = True\n");
             sb.append("bsdf_gd = mat_guard.node_tree.nodes.get('Principled BSDF')\n");
@@ -435,14 +398,14 @@ public class BlenderWorkerAgent {
             sb.append("    bsdf_gd.inputs['Base Color'].default_value = (0.7, 0.72, 0.74, 1.0)\n");
             sb.append("    bsdf_gd.inputs['Metallic'].default_value = 0.9\n");
             sb.append("    bsdf_gd.inputs['Roughness'].default_value = 0.25\n");
-            sb.append("bpy.ops.mesh.primitive_cube_add(size=1, location=(6.8, 125.0, 0.55))\n");
+            sb.append("bpy.ops.mesh.primitive_cube_add(size=1, location=(").append(pathWidth / 2.0f - 0.2f).append(", ").append(pathLen / 2.0f).append(", 0.45))\n");
             sb.append("guardrail = bpy.context.active_object\n");
             sb.append("guardrail.name = 'Highway_Guardrail'\n");
-            sb.append("guardrail.scale = (0.1, 250.0, 0.35)\n");
+            sb.append("guardrail.scale = (0.1, ").append(pathLen).append(", 0.35)\n");
             sb.append("bpy.ops.object.transform_apply(scale=True)\n");
             sb.append("guardrail.data.materials.append(mat_guard)\n\n");
 
-            sb.append("# RULES 3 & 4: MASTER ROOT PARENTING AT CLEAN (1,1,1) UNIT SCALE & DRIVING ANIMATION\n");
+            sb.append("# MASTER ROOT PARENTING AT UNIT SCALE (1,1,1) & DYNAMIC DRIVING ANIMATION\n");
             sb.append("_root = bpy.data.objects.get('Model_Root')\n");
             sb.append("if not _root:\n");
             sb.append("    _root = bpy.data.objects.new('Model_Root', None)\n");
@@ -456,47 +419,48 @@ public class BlenderWorkerAgent {
 
             sb.append("_env_filter = ['road', 'highway', 'asphalt', 'ground', 'stripe', 'lane', 'marking', 'dash', 'guardrail', 'barrier', 'curb', 'sidewalk', 'terrain', 'plane', 'sky', 'light', 'lamp', 'camera']\n");
             sb.append("_car_objs = [o for o in bpy.data.objects if o.type == 'MESH' and not any(k in o.name.lower() for k in _env_filter)]\n");
-            sb.append("# 1. Clear residual animation on individual meshes to prevent transform fighting\n");
             sb.append("for _co in _car_objs:\n");
             sb.append("    if _co.animation_data:\n");
             sb.append("        _co.animation_data_clear()\n");
             sb.append("    _co.parent = _root\n");
             sb.append("    _co.matrix_parent_inverse = _root.matrix_world.inverted()\n\n");
 
-            sb.append("# 2. Driving Animation: Start at Y=15.0 with open runway, drive to Y=95.0\n");
+            float endY = Math.min(pathLen * 0.75f, 350.0f);
+            sb.append("# Dynamic Driving Timeline: 1 to ").append(totalFrames).append(" frames (Travels Y: 15m to ").append(endY).append("m)\n");
             sb.append("bpy.context.scene.frame_start = 1\n");
-            sb.append("bpy.context.scene.frame_end = 60\n");
+            sb.append("bpy.context.scene.frame_end = ").append(totalFrames).append("\n");
             sb.append("_root.location = (0.0, 15.0, 0.0)\n");
             sb.append("_root.keyframe_insert(data_path='location', frame=1)\n");
-            sb.append("_root.location = (0.0, 95.0, 0.0)\n");
-            sb.append("_root.keyframe_insert(data_path='location', frame=60)\n");
+            sb.append("_root.location = (0.0, ").append(endY).append(", 0.0)\n");
+            sb.append("_root.keyframe_insert(data_path='location', frame=").append(totalFrames).append(")\n");
             sb.append("if _root.animation_data and _root.animation_data.action:\n");
             sb.append("    for _fc in _root.animation_data.action.fcurves:\n");
             sb.append("        for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n\n");
 
-            sb.append("# 3. Baked Wheel Spin: Keyframe frame-by-frame (1->60) to eliminate quaternion slerp jitter\n");
+            float rotDelta = (float) ((endY - 15.0) / 0.35 * -1.0);
+            sb.append("# Baked Wheel Rotation per frame (1->").append(totalFrames).append(")\n");
             sb.append("_wheel_keys = ['wheel', 'tire', 'rim', 'tyre', 'disc']\n");
             sb.append("_wheels = [o for o in _car_objs if any(wk in o.name.lower() for wk in _wheel_keys)]\n");
             sb.append("for _wo in _wheels:\n");
             sb.append("    _wo.rotation_mode = 'XYZ'\n");
             sb.append("    _wo.animation_data_clear()\n");
-            sb.append("    for _f in range(1, 61):\n");
-            sb.append("        _prog = (_f - 1) / 59.0\n");
-            sb.append("        _wo.rotation_euler.x = (214.28 * _prog)\n");
+            sb.append("    for _f in range(1, ").append(totalFrames + 1).append("):\n");
+            sb.append("        _prog = (_f - 1) / ").append((float) (totalFrames - 1)).append("\n");
+            sb.append("        _wo.rotation_euler.x = (").append(rotDelta).append(" * _prog)\n");
             sb.append("        _wo.keyframe_insert(data_path='rotation_euler', frame=_f)\n");
             sb.append("    if _wo.animation_data and _wo.animation_data.action:\n");
             sb.append("        for _fc in _wo.animation_data.action.fcurves:\n");
             sb.append("            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n");
 
         } else if (sceneType.contains("nature") || sceneType.contains("outdoor") || sceneType.contains("villa")) {
-            sb.append("# Ambient Ground Plane\n");
-            sb.append("bpy.ops.mesh.primitive_plane_add(size=36, location=(0, 0, 0))\n");
+            sb.append("# Expansive Ground Terrain\n");
+            sb.append("bpy.ops.mesh.primitive_plane_add(size=").append(pathLen / 4.0f).append(", location=(0, 0, 0))\n");
             sb.append("ground = bpy.context.active_object\n");
             sb.append("ground.name = 'Ground_Surface'\n");
             sb.append("ground.data.materials.append(mat_road)\n");
         } else {
-            sb.append("# Clean studio floor pedestal\n");
-            sb.append("bpy.ops.mesh.primitive_cylinder_add(radius=5.0, depth=0.08, location=(0, 0, -0.04))\n");
+            sb.append("# Clean Studio Pedestal Stage\n");
+            sb.append("bpy.ops.mesh.primitive_cylinder_add(radius=6.0, depth=0.15, location=(0, 0, -0.075))\n");
             sb.append("pedestal = bpy.context.active_object\n");
             sb.append("pedestal.name = 'Studio_Pedestal'\n");
             sb.append("pedestal.data.materials.append(mat_road)\n");
@@ -506,28 +470,32 @@ public class BlenderWorkerAgent {
     }
 
     /**
-     * Builds Worker 3: Cinematics, World Tracking Camera (Outside car chassis),
-     * Natural Sun Lighting with Ambient Sky Radiance, 180-deg Optical Motion Blur, AgX Color Management,
-     * Complete Scene GLB Export (including Road), and MP4 Video Rendering.
+     * Builds Worker 3: Cinematics, Dynamic World-Space Chase Camera with 10km Far Clip,
+     * Verified World Background Nodes, Sun Lighting, Motion Blur, and Complete Scene Export.
      */
     private static String buildWorker3LightingAndRenderScript(AIDirectorSpec spec) {
         StringBuilder sb = new StringBuilder();
         int seed = (spec != null) ? spec.getSeedLighting() : 202;
-        sb.append("random.seed(").append(seed).append(")\n\n");
-
+        float pathLen = (spec != null) ? spec.getPathLengthMeters() : 1000.0f;
+        int totalFrames = (spec != null) ? spec.getTotalFrames() : 150;
+        int fps = (spec != null) ? spec.getFps() : 30;
         float sunIntensity = (spec != null && spec.getSunIntensity() > 0) ? spec.getSunIntensity() : 6.0f;
         float sunElevation = (spec != null) ? spec.getSunElevation() : 18.0f;
         float sunAzimuth = (spec != null) ? spec.getSunAzimuth() : -45.0f;
+        float camHeight = (spec != null) ? spec.getCameraHeightMeters() : 0.20f;
+        float camDist = (spec != null) ? spec.getCameraDistanceMeters() : 6.5f;
+
+        sb.append("random.seed(").append(seed).append(")\n\n");
 
         String sceneType = (spec != null && spec.getSceneType() != null) ? spec.getSceneType().toLowerCase() : "general";
         boolean isVehicle = sceneType.contains("vehicle") || sceneType.contains("car") || sceneType.contains("drive") || sceneType.contains("speed");
 
-        // RULE 5: CINEMATIC TRACKING CAMERA SETUP
-        sb.append("# RULE 5: CINEMATIC CAMERA SETUP\n");
+        // DYNAMIC CINEMATIC CAMERA SETUP WITH 10KM FAR CLIP
+        sb.append("# DYNAMIC CINEMATIC CAMERA SETUP\n");
         sb.append("try:\n");
         sb.append("    cam_data = bpy.data.cameras.new('CinematicCamera')\n");
         sb.append("    cam_data.lens = 35.0\n");
-        sb.append("    cam_data.clip_end = 500.0\n");
+        sb.append("    cam_data.clip_end = 10000.0\n"); // 10 km clip ensures long expressways are never clipped
         sb.append("    cam_data.dof.use_dof = True\n");
         sb.append("    cam_data.dof.aperture_fstop = 2.8\n");
         sb.append("    cam_obj = bpy.data.objects.new('Camera', cam_data)\n");
@@ -535,16 +503,16 @@ public class BlenderWorkerAgent {
         sb.append("    bpy.context.scene.camera = cam_obj\n\n");
 
         if (isVehicle) {
-            sb.append("    # Move camera in world-meters along Y (unparented to avoid downscale inside chassis)\n");
+            float endY = Math.min(pathLen * 0.75f, 350.0f);
+            sb.append("    # Camera tracks car in world meters from start to finish\n");
             sb.append("    _root = bpy.data.objects.get('Model_Root')\n");
             sb.append("    cam_obj.parent = None\n");
             sb.append("    cam_obj.scale = (1.0, 1.0, 1.0)\n");
-            sb.append("    cam_obj.constraints.clear()\n");
             sb.append("    cam_obj.animation_data_clear()\n");
-            sb.append("    cam_obj.location = (-3.8, 8.0, 2.0)\n");
+            sb.append("    cam_obj.location = (-3.8, ").append(15.0f - camDist).append(", ").append(camHeight).append(")\n");
             sb.append("    cam_obj.keyframe_insert(data_path='location', frame=1)\n");
-            sb.append("    cam_obj.location = (-3.8, 88.0, 2.0)\n");
-            sb.append("    cam_obj.keyframe_insert(data_path='location', frame=60)\n");
+            sb.append("    cam_obj.location = (-3.8, ").append(endY - camDist).append(", ").append(camHeight).append(")\n");
+            sb.append("    cam_obj.keyframe_insert(data_path='location', frame=").append(totalFrames).append(")\n");
             sb.append("    if cam_obj.animation_data and cam_obj.animation_data.action:\n");
             sb.append("        for _fc in cam_obj.animation_data.action.fcurves:\n");
             sb.append("            for _kp in _fc.keyframe_points: _kp.interpolation = 'LINEAR'\n");
@@ -561,19 +529,27 @@ public class BlenderWorkerAgent {
         }
         sb.append("except Exception as ce: print(f'Camera warning: {ce}')\n\n");
 
-        // Natural Sunlight Rig & Ambient Sky Radiance
-        sb.append("# Natural Golden-Hour Sunlight & Ambient Sky Radiance\n");
+        // VERIFIED WORLD BACKGROUND NODES & SUN ILLUMINATION
+        sb.append("# Natural Golden-Hour Sunlight & Verified Ambient World Radiance\n");
         sb.append("try:\n");
         sb.append("    sun_data = bpy.data.lights.new('KeySun', type='SUN')\n");
         sb.append("    sun_data.energy = ").append(sunIntensity).append("\n");
+        sb.append("    sun_data.color = (1.0, 0.98, 0.92)\n");
         sb.append("    sun_obj = bpy.data.objects.new('KeySunLight', sun_data)\n");
         sb.append("    bpy.context.collection.objects.link(sun_obj)\n");
         sb.append("    sun_obj.rotation_euler = (math.radians(").append(sunElevation).append("), 0, math.radians(").append(sunAzimuth).append("))\n");
-        sb.append("    if bpy.context.scene.world and bpy.context.scene.world.node_tree:\n");
-        sb.append("        _bg = bpy.context.scene.world.node_tree.nodes.get('Background')\n");
-        sb.append("        if _bg:\n");
-        sb.append("            _bg.inputs['Color'].default_value = (0.65, 0.82, 1.0, 1.0)\n");
-        sb.append("            _bg.inputs['Strength'].default_value = 1.2\n");
+        sb.append("    if not bpy.context.scene.world:\n");
+        sb.append("        bpy.context.scene.world = bpy.data.worlds.new('Vynara_World')\n");
+        sb.append("    bpy.context.scene.world.use_nodes = True\n");
+        sb.append("    _bg = bpy.context.scene.world.node_tree.nodes.get('Background')\n");
+        sb.append("    if not _bg:\n");
+        sb.append("        _bg = bpy.context.scene.world.node_tree.nodes.new('ShaderNodeBackground')\n");
+        sb.append("        _out = bpy.context.scene.world.node_tree.nodes.get('World Output')\n");
+        sb.append("        if not _out:\n");
+        sb.append("            _out = bpy.context.scene.world.node_tree.nodes.new('ShaderNodeOutputWorld')\n");
+        sb.append("        bpy.context.scene.world.node_tree.links.new(_bg.outputs['Background'], _out.inputs['Surface'])\n");
+        sb.append("    _bg.inputs['Color'].default_value = (0.65, 0.82, 1.0, 1.0)\n");
+        sb.append("    _bg.inputs['Strength'].default_value = 1.2\n");
         sb.append("except Exception as le: print(f'Sunlight/Ambient warning: {le}')\n\n");
 
         // Render Configuration: Motion Blur & Shutter Speed
@@ -586,9 +562,9 @@ public class BlenderWorkerAgent {
         sb.append("scene.cycles.use_denoising = False\n");
         sb.append("scene.render.resolution_x = 960\n");
         sb.append("scene.render.resolution_y = 540\n");
-        sb.append("scene.render.fps = 30\n");
+        sb.append("scene.render.fps = ").append(fps).append("\n");
         sb.append("scene.frame_start = 1\n");
-        sb.append("scene.frame_end = 60\n\n");
+        sb.append("scene.frame_end = ").append(totalFrames).append("\n\n");
 
         sb.append("# Optical Shutter Speed (180-deg Shutter = 0.5 frame blur)\n");
         sb.append("scene.render.use_motion_blur = True\n");
@@ -601,26 +577,26 @@ public class BlenderWorkerAgent {
         sb.append("    scene.view_settings.look = 'AgX - High Contrast'\n");
         sb.append("except Exception as ve: print(f'Color management note: {ve}')\n\n");
 
-        // Step 1: Export Interactive GLB (Always after Worker 2 road & car are committed)
-        sb.append("# Step 1: Export Interactive 3D GLTF/GLB (Includes Road, Car, and Kinematics)\n");
+        // Step 1: Export Complete Scene to model.glb
+        sb.append("# Step 1: Export Complete Scene to model.glb\n");
         sb.append("try:\n");
         sb.append("    for _o in list(bpy.data.objects):\n");
-        sb.append("        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n" +
-                  "            bpy.data.objects.remove(_o, do_unlink=True)\n");
-        sb.append("    bpy.ops.export_scene.gltf(\n" +
-                  "        filepath='output/model.glb',\n" +
-                  "        export_format='GLB',\n" +
-                  "        export_apply=False,\n" +
-                  "        export_skins=True,\n" +
-                  "        export_animations=True,\n" +
-                  "        export_materials='EXPORT'\n" +
-                  "    )\n");
+        sb.append("        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n");
+        sb.append("            bpy.data.objects.remove(_o, do_unlink=True)\n");
+        sb.append("    bpy.ops.export_scene.gltf(\n");
+        sb.append("        filepath='output/model.glb',\n");
+        sb.append("        export_format='GLB',\n");
+        sb.append("        export_apply=False,\n");
+        sb.append("        export_skins=True,\n");
+        sb.append("        export_animations=True,\n");
+        sb.append("        export_materials='EXPORT'\n");
+        sb.append("    )\n");
         sb.append("    print('GLB Export Successful: output/model.glb (Road, Vehicle & Rig Committed)')\n");
         sb.append("except Exception as ge:\n");
         sb.append("    print(f'GLTF export warning: {ge}')\n");
         sb.append("    raise ge\n\n");
 
-        // Step 2: Render Still Preview at Frame 1
+        // Step 2: Render Still Snapshot Frame at Frame 1
         sb.append("# Step 2: Render Still Snapshot Frame at Frame 1\n");
         sb.append("try:\n");
         sb.append("    scene.frame_set(1)\n");
