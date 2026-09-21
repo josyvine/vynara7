@@ -39,7 +39,6 @@ jobs:
         run: |
           mkdir -p inputs
           
-          # Early extraction of base64 model payloads so Assimp can inspect and convert if needed
           python3 - << 'PYEOF'
           import json, os, base64
           event_path = os.environ.get('GITHUB_EVENT_PATH')
@@ -76,14 +75,13 @@ jobs:
             fi
           fi
 
-          # Autonomous format inspection: Detect ASCII FBX across root and inputs/ and auto-convert to standard GLB
           for fbx_candidate in "input_model.fbx" "inputs/input_model.fbx"; do
             if [ -f "$fbx_candidate" ]; then
               if ! head -c 20 "$fbx_candidate" | grep -q "Kaydara FBX Binary"; then
-                echo "Detected ASCII FBX at $fbx_candidate (unsupported natively by Blender). Auto-converting via assimp..."
+                echo "Detected ASCII FBX at $fbx_candidate. Auto-converting via assimp..."
                 assimp export "$fbx_candidate" "input_model.glb"
                 if [ -f "input_model.glb" ] && [ -s "input_model.glb" ]; then
-                  echo "Successfully converted ASCII FBX -> input_model.glb ($(stat -c%s input_model.glb) bytes)"
+                  echo "Successfully converted ASCII FBX -> input_model.glb"
                   cp "input_model.glb" "inputs/input_model.glb"
                   rm -f "$fbx_candidate"
                 fi
@@ -93,397 +91,308 @@ jobs:
             fi
           done
 
-          ls -la input_model.* inputs/ 2>/dev/null || echo "No uploaded 3D model detected. Running pure procedural pipeline."
+          ls -la input_model.* inputs/ 2>/dev/null || echo "No uploaded 3D model detected."
 
-      # Step 5: Execute Blender Python Script with Auto-Repair & Dynamic Scene Rendering
-      - name: Execute Blender Python Script
+      # Step 5: Execute Blender Process (Boot Blender First, Clean Separation, Dynamic Gemini Agent)
+      - name: Execute Blender Python Engine
         env:
-          BPY_SCRIPT: ${{ github.event.client_payload.bpy_script }}
-          ASSET_ID: ${{ github.event.client_payload.asset_id }}
-          W1_STRUCTURE: ${{ github.event.client_payload.w1StructureScript || github.event.client_payload.w1HeroScript }}
-          W2_DETAILS: ${{ github.event.client_payload.w2DetailsScript || github.event.client_payload.w2EnvScript }}
-          W3_MATERIALS: ${{ github.event.client_payload.w3MaterialsScript || github.event.client_payload.w3LightScript }}
-          W4_CINEMATICS: ${{ github.event.client_payload.w4CinematicsScript }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           mkdir -p output
           
           python3 - << 'EOF'
-          import json, os, sys, re, base64, py_compile
+          import json, os, sys, base64, urllib.request, urllib.error, traceback
 
           event_path = os.environ.get('GITHUB_EVENT_PATH')
-          bpy_script = ''
-          w1 = ''
-          w2 = ''
-          w3 = ''
-          w4 = ''
           payload = {}
-
           if event_path and os.path.exists(event_path):
               try:
                   with open(event_path, 'r', encoding='utf-8') as ef:
                       event_data = json.load(ef)
                       payload = event_data.get('client_payload', {})
-                      
-                      input_model_b64 = payload.get('input_model_b64', '')
-                      if input_model_b64 and input_model_b64.strip():
-                          try:
-                              with open('input_model.glb', 'wb') as mf:
-                                  mf.write(base64.b64decode(input_model_b64))
-                              os.makedirs('inputs', exist_ok=True)
-                              with open('inputs/input_model.glb', 'wb') as mf2:
-                                  mf2.write(base64.b64decode(input_model_b64))
-                              print("Successfully unpacked user input 3D model: input_model.glb")
-                          except Exception as me:
-                              print(f"Warning unpacking user model: {me}")
+              except Exception as pe:
+                  print(f"Event payload read warning: {pe}")
 
-                      if 'bpy_script_b64' in payload and payload['bpy_script_b64'].strip():
-                          bpy_script = base64.b64decode(payload['bpy_script_b64']).decode('utf-8', errors='ignore')
-                      elif 'bpy_script' in payload:
-                          candidate = payload['bpy_script'].strip()
-                          if candidate.startswith('b64:'):
-                              bpy_script = base64.b64decode(candidate[4:]).decode('utf-8', errors='ignore')
-                          else:
-                              bpy_script = candidate
-                              
-                      w1 = payload.get('w1StructureScript', payload.get('w1HeroScript', ''))
-                      w2 = payload.get('w2DetailsScript', payload.get('w2EnvScript', ''))
-                      w3 = payload.get('w3MaterialsScript', payload.get('w3LightScript', ''))
-                      w4 = payload.get('w4CinematicsScript', '')
-              except Exception as e:
-                  print(f"Note on GITHUB_EVENT_PATH read: {e}")
+          is_raw_script = bool(payload.get('isRawScript', payload.get('is_raw_script', False)))
+          user_prompt = payload.get('user_prompt', payload.get('prompt', '')).strip()
+          selected_model = payload.get('selected_model', 'gemini-2.5-flash').strip()
+          gemini_api_key = payload.get('gemini_api_key', '').strip() or os.environ.get('GEMINI_API_KEY', '').strip()
 
-          # Fallback to environment variables
-          if not bpy_script:
-              env_s = os.environ.get('BPY_SCRIPT', '').strip()
-              if env_s.startswith('b64:'):
-                  try:
-                      bpy_script = base64.b64decode(env_s[4:]).decode('utf-8', errors='ignore')
-                  except Exception:
-                      bpy_script = env_s
+          # Extract pre-sent script if present
+          raw_bpy_script = ''
+          if 'bpy_script_b64' in payload and payload['bpy_script_b64'].strip():
+              raw_bpy_script = base64.b64decode(payload['bpy_script_b64']).decode('utf-8', errors='ignore')
+          elif 'bpy_script' in payload and payload['bpy_script'].strip():
+              cand = payload['bpy_script'].strip()
+              if cand.startswith('b64:'):
+                  raw_bpy_script = base64.b64decode(cand[4:]).decode('utf-8', errors='ignore')
               else:
-                  bpy_script = env_s
+                  raw_bpy_script = cand
 
-          if not w1: w1 = os.environ.get('W1_STRUCTURE', '')
-          if not w2: w2 = os.environ.get('W2_DETAILS', '')
-          if not w3: w3 = os.environ.get('W3_MATERIALS', '')
-          if not w4: w4 = os.environ.get('W4_CINEMATICS', '')
+          # Serialize execution instructions into runner task script
+          with open('task_config.json', 'w', encoding='utf-8') as cfg_f:
+              json.dump({
+                  "is_raw_script": is_raw_script,
+                  "user_prompt": user_prompt,
+                  "selected_model": selected_model,
+                  "gemini_api_key": gemini_api_key,
+                  "has_raw_bpy_script": bool(raw_bpy_script.strip())
+              }, cfg_f)
 
-          # Assemble dynamic modular scripts if provided separately
-          if not bpy_script.strip() and (w1.strip() or w2.strip() or w3.strip() or w4.strip()):
-              bpy_script = (
-                  "import bpy, os, math, random, sys, traceback\n\n"
-                  "os.makedirs('output', exist_ok=True)\n"
-                  "bpy.ops.object.select_all(action='SELECT')\n"
-                  "bpy.ops.object.delete(use_global=False)\n\n"
-                  f"# --- W1: STRUCTURE ---\n{w1}\n\n"
-                  f"# --- W2: DETAILS & PROPS ---\n{w2}\n\n"
-                  f"# --- W3: PBR MATERIALS ---\n{w3}\n\n"
-                  f"# --- W4: LIGHTING & CAM ---\n{w4}\n"
-              )
+          if raw_bpy_script.strip():
+              with open('input_script.py', 'w', encoding='utf-8') as sf:
+                  sf.write(raw_bpy_script)
 
-          if not bpy_script.strip():
-              err_msg = "FATAL ERROR: No Blender Python script provided in payload."
-              print(err_msg)
-              with open('output/error.txt', 'w', encoding='utf-8') as ef:
-                  ef.write(err_msg + '\n')
-              sys.exit(1)
+          # Write runner controller script executed INSIDE Blender
+          runner_code = r'''
+import bpy, os, sys, json, math, mathutils, urllib.request, urllib.error, traceback
 
-          # Determine whether an imported 3D asset model physically exists in the workspace
-          has_imported_model = (
-              os.path.exists('input_model.glb') or os.path.exists('inputs/input_model.glb') or
-              os.path.exists('input_model.fbx') or os.path.exists('inputs/input_model.fbx') or
-              os.path.exists('input_model.obj') or os.path.exists('inputs/input_model.obj') or
-              os.path.exists('input_model.gltf') or os.path.exists('inputs/input_model.gltf')
-          )
+os.makedirs('output', exist_ok=True)
 
-          print(f"Vynara Dynamic Pipeline: has_imported_model={has_imported_model}")
+with open('task_config.json', 'r', encoding='utf-8') as f:
+    cfg = json.load(f)
 
-          # CRITICAL FIX: Strip any early premature export calls from Gemini so model.glb is exported cleanly at the end
-          bpy_script = re.sub(r"bpy\.ops\.export_scene\.gltf\([^)]*\)", "print('Stripped early premature GLTF export.')", bpy_script)
+is_raw_script = cfg.get("is_raw_script", False)
+user_prompt = cfg.get("user_prompt", "")
+selected_model = cfg.get("selected_model", "gemini-2.5-flash")
+gemini_api_key = cfg.get("gemini_api_key", "")
+has_raw_bpy_script = cfg.get("has_raw_bpy_script", False)
 
-          # --- AST & REGEX AUTO-REPAIR PIPELINE ---
+# -------------------------------------------------------------------------
+# TRACK 1: RAW PYTHON AUTOMATION (3D MODEL GENERATION ONLY - NO ANIMATION)
+# -------------------------------------------------------------------------
+if is_raw_script:
+    print("Vynara Runner: Executing Track 1 [Raw Python 3D Model Creation]")
+    if os.path.exists('input_script.py'):
+        with open('input_script.py', 'r', encoding='utf-8') as sf:
+            code = sf.read()
+        exec(code, globals())
+    
+    # Export 3D mesh model
+    bpy.ops.export_scene.gltf(
+        filepath='output/model.glb',
+        export_format='GLB',
+        export_apply=False,
+        export_skins=True,
+        export_animations=False,
+        export_materials='EXPORT'
+    )
+    
+    # Render single still preview snapshot
+    sc = bpy.context.scene
+    sc.render.filepath = 'output/render.png'
+    sc.render.engine = 'CYCLES'
+    sc.cycles.device = 'CPU'
+    sc.cycles.samples = 4
+    bpy.ops.render.render(write_still=True)
+    print("SUCCESS: Raw Python 3D Model and still preview generated.")
+    sys.exit(0)
 
-          # Auto-Repair 1: Neutralize unstable headless addon registrations
-          bpy_script = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", bpy_script)
+# -------------------------------------------------------------------------
+# TRACK 2: UNIVERSAL PROMPT + 3D IMPORT ANIMATION (BOOT BLENDER FIRST)
+# -------------------------------------------------------------------------
+print("Vynara Runner: Executing Track 2 [Live Blender-First Scene & Animation]")
 
-          # Auto-Repair 2: Fix unquoted node lookups
-          bpy_script = re.sub(r'nodes\.get\(\s*([A-Za-z0-9_ ]+)\s*\)', lambda m: f'nodes.get("{m.group(1).strip()}")' if '"' not in m.group(1) and "'" not in m.group(1) else m.group(0), bpy_script)
+# Import model if present
+imported_model = None
+for candidate in ['input_model.glb', 'inputs/input_model.glb', 'input_model.fbx', 'inputs/input_model.fbx', 'input_model.obj']:
+    if os.path.exists(candidate):
+        ext = os.path.splitext(candidate)[1].lower()
+        if ext in ['.glb', '.gltf']:
+            bpy.ops.import_scene.gltf(filepath=candidate)
+            imported_model = candidate
+            break
+        elif ext == '.fbx':
+            bpy.ops.import_scene.fbx(filepath=candidate)
+            imported_model = candidate
+            break
+        elif ext == '.obj':
+            bpy.ops.wm.obj_import(filepath=candidate)
+            imported_model = candidate
+            break
 
-          # Auto-Repair 3: Fix unquoted f-strings
-          bpy_script = re.sub(r'(?<=[=\s,(])f([a-zA-Z0-9_]+\{[^}"\n]+\}[a-zA-Z0-9_]*)', r'f"\1"', bpy_script)
+# Calculate real bounding box of all mesh objects
+mesh_objs = [o for o in bpy.data.objects if o.type == 'MESH']
+min_x = min_y = min_z = float('inf')
+max_x = max_y = max_z = float('-inf')
+for o in mesh_objs:
+    for corner in [o.matrix_world @ mathutils.Vector(b) for b in o.bound_box]:
+        min_x, max_x = min(min_x, corner.x), max(max_x, corner.x)
+        min_y, max_y = min(min_y, corner.y), max(max_y, corner.y)
+        min_z, max_z = min(min_z, corner.z), max(max_z, corner.z)
 
-          # Auto-Repair 4: Fix hallucinated operator names
-          bpy_script = bpy_script.replace(".primitive_cube_create(", ".primitive_cube_add(")
-          bpy_script = bpy_script.replace(".primitive_plane_create(", ".primitive_plane_add(")
-          bpy_script = bpy_script.replace(".primitive_cylinder_create(", ".primitive_cylinder_add(")
-          bpy_script = bpy_script.replace(".primitive_cone_create(", ".primitive_cone_add(")
-          bpy_script = bpy_script.replace(".primitive_uv_sphere_create(", ".primitive_uv_sphere_add(")
-          bpy_script = bpy_script.replace("bpy.ops.light.add(", "bpy.ops.object.light_add(")
-          bpy_script = bpy_script.replace("bpy.ops.camera.add(", "bpy.ops.object.camera_add(")
-          bpy_script = bpy_script.replace("bpy.ops.object.mesh.", "bpy.ops.mesh.")
+has_bounds = (min_x != float('inf'))
+center = mathutils.Vector(((min_x + max_x)/2.0, (min_y + max_y)/2.0, (min_z + max_z)/2.0)) if has_bounds else mathutils.Vector((0, 0, 0))
+dim = max(max_x - min_x, max_y - min_y, max_z - min_z) if has_bounds else 2.0
+dim = max(dim, 0.5)
 
-          # Auto-Repair 5: Fix hallucinated update_from_data and node_nodes
-          bpy_script = bpy_script.replace(".update_from_data()", ".data.update()")
-          bpy_script = bpy_script.replace(".node_nodes", ".use_nodes")
+# If pre-sent script exists, execute it. Otherwise, call Gemini live.
+if has_raw_bpy_script and os.path.exists('input_script.py'):
+    with open('input_script.py', 'r', encoding='utf-8') as sf:
+        code = sf.read()
+    exec(code, globals())
+elif gemini_api_key and user_prompt:
+    print(f"Calling Gemini API live from Blender using model: {selected_model}")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent?key={gemini_api_key}"
+    
+    system_inst = (
+        "You are a professional 3D technical director writing Python code inside a LIVE Blender 4.2 session.\n"
+        f"Active Scene State: Imported Model Present={bool(imported_model)}, Bounding Box Center={center}, Max Dimension={dim}m.\n"
+        "RULES:\n"
+        "1. Output ONLY executable Python code inside a ```python ``` code block.\n"
+        "2. Principled BSDF color inputs expect 4-element RGBA tuples: (r, g, b, 1.0).\n"
+        "3. Motion blur is set via scene.render.use_motion_blur = True and scene.render.motion_blur_shutter.\n"
+        "4. Object transform matrices are obj.matrix_world or obj.matrix_basis (never matrix_data).\n"
+        "5. Set scene.frame_start = 1 and calculate scene.frame_end dynamically from prompt duration and fps.\n"
+        "6. Do not re-import the asset; build the environment, materials, camera, and keyframe animation around existing objects."
+    )
+    
+    req_body = {
+        "contents": [{"parts": [{"text": f"User Creative Prompt: {user_prompt}"}]}],
+        "systemInstruction": {"parts": [{"text": system_inst}]}
+    }
+    
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(req_body).encode('utf-8'),
+        headers={'Content-Type': 'application/json'}
+    )
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp_data = json.loads(resp.read().decode('utf-8'))
+            ai_text = resp_data['candidates'][0]['content']['parts'][0]['text']
+            
+            # Extract python code
+            if '```python' in ai_text:
+                ai_code = ai_text.split('```python')[1].split('```')[0].strip()
+            elif '```' in ai_text:
+                ai_code = ai_text.split('```')[1].split('```')[0].strip()
+            else:
+                ai_code = ai_text.strip()
+            
+            try:
+                exec(ai_code, globals())
+            except Exception as live_err:
+                print(f"Live Execution Notice: {live_err}. Requesting repair...")
+                # Live single-turn repair inside running process
+                repair_prompt = f"The previous script threw this exception: {traceback.format_exc()}. Provide the complete corrected Python code."
+                req_body['contents'].append({"parts": [{"text": ai_text}]})
+                req_body['contents'].append({"parts": [{"text": repair_prompt}]})
+                req_repair = urllib.request.Request(url, data=json.dumps(req_body).encode('utf-8'), headers={'Content-Type': 'application/json'})
+                with urllib.request.urlopen(req_repair, timeout=30) as rep_resp:
+                    rep_data = json.loads(rep_resp.read().decode('utf-8'))
+                    rep_text = rep_data['candidates'][0]['content']['parts'][0]['text']
+                    rep_code = rep_text.split('```python')[1].split('```')[0].strip() if '```python' in rep_text else rep_text.strip()
+                    exec(rep_code, globals())
+    except Exception as api_err:
+        print(f"Gemini API Live Call Warning: {api_err}")
 
-          # Auto-Repair 6: Blender 4.2+ Principled BSDF socket name updates
-          bpy_script = bpy_script.replace("['Transmission'].default_value", "['Transmission Weight'].default_value")
-          bpy_script = bpy_script.replace("['Subsurface'].default_value", "['Subsurface Weight'].default_value")
-          bpy_script = bpy_script.replace("['Specular'].default_value", "['Specular IOR Level'].default_value")
-          bpy_script = bpy_script.replace("['BaseColor']", "['Base Color']")
-          bpy_script = bpy_script.replace('["BaseColor"]', '["Base Color"]')
-          bpy_script = bpy_script.replace("'BLENDER_EEVEE'", "'CYCLES'")
-          bpy_script = bpy_script.replace('"BLENDER_EEVEE"', '"CYCLES"')
-          bpy_script = bpy_script.replace("'BLENDER_EEVEE_NEXT'", "'CYCLES'")
-          bpy_script = bpy_script.replace('"BLENDER_EEVEE_NEXT"', '"CYCLES"')
+# --- UNIVERSAL RENDER & EXPORT STAGE ---
+sc = bpy.context.scene
 
-          # Auto-Repair 7: Ensure Base Color is ALWAYS a 4-tuple (RGBA) with alpha
-          bpy_script = re.sub(
-              r"(inputs\s*\[\s*['\"]Base Color['\"]\s*\]\.default_value\s*=\s*\(\s*[-+]?[0-9]*\.?[0-9]+\s*,\s*[-+]?[0-9]*\.?[0-9]+\s*,\s*[-+]?[0-9]*\.?[0-9]+\s*)\)",
-              r"\1, 1.0)",
-              bpy_script
-          )
+# Ensure World lighting exists
+if not sc.world:
+    sc.world = bpy.data.worlds.new('Vynara_World')
+sc.world.use_nodes = True
+bg = sc.world.node_tree.nodes.get('Background')
+if not bg:
+    bg = sc.world.node_tree.nodes.new('ShaderNodeBackground')
+    out = sc.world.node_tree.nodes.get('World Output') or sc.world.node_tree.nodes.new('ShaderNodeOutputWorld')
+    sc.world.node_tree.links.new(bg.outputs['Background'], out.inputs['Surface'])
+bg.inputs['Color'].default_value = (0.75, 0.85, 0.95, 1.0)
+bg.inputs['Strength'].default_value = max(float(bg.inputs['Strength'].default_value), 1.0)
 
-          # Auto-Repair 8: Blender 4.2+ AgX Color Management Look Enums
-          look_fixes = [
-              (r"view_settings\.look\s*=\s*['\"]High Contrast['\"]", "view_settings.look = 'AgX - High Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Very High Contrast['\"]", "view_settings.look = 'AgX - Very High Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Medium High Contrast['\"]", "view_settings.look = 'AgX - Medium High Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Medium Low Contrast['\"]", "view_settings.look = 'AgX - Medium Low Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Low Contrast['\"]", "view_settings.look = 'AgX - Low Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Very Low Contrast['\"]", "view_settings.look = 'AgX - Very Low Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Base Contrast['\"]", "view_settings.look = 'AgX - Base Contrast'"),
-              (r"view_settings\.look\s*=\s*['\"]Punchy['\"]", "view_settings.look = 'AgX - Punchy'")
-          ]
-          for pattern, replacement in look_fixes:
-              bpy_script = re.sub(pattern, replacement, bpy_script)
+# Ensure Sunlight exists
+if not any(o.type == 'LIGHT' for o in bpy.data.objects):
+    sdata = bpy.data.lights.new('Key_Sun', 'SUN')
+    sdata.energy = 4.0
+    sun = bpy.data.objects.new('Key_Sun', sdata)
+    bpy.context.collection.objects.link(sun)
+    sun.rotation_euler = (math.radians(50.0), math.radians(20.0), math.radians(-35.0))
 
-          # Auto-Repair 9: Wrap view_settings.look in try-except block
-          bpy_script = re.sub(
-              r"^([ \t]*)(.*view_settings\.look\s*=.*)$",
-              r"\1try:\n\1    \2\n\1except Exception as _look_err: print(f'View settings look notice: {_look_err}')",
-              bpy_script,
-              flags=re.MULTILINE
-          )
+# Universal Camera Auto-Framing (relative to real 3D mesh dimensions)
+cam = sc.camera
+if not cam:
+    for o in bpy.data.objects:
+        if o.type == 'CAMERA':
+            cam = o; break
+if not cam:
+    cdata = bpy.data.cameras.new('Universal_Camera')
+    cam = bpy.data.objects.new('Universal_Camera', cdata)
+    bpy.context.collection.objects.link(cam)
+    cam.location = (center.x - dim * 1.5, center.y - dim * 2.0, center.z + dim * 0.9)
+    cam_dir = center - cam.location
+    cam.rotation_euler = cam_dir.to_track_quat('-Z', 'Y').to_euler()
+sc.camera = cam
+if cam and cam.data:
+    cam.data.clip_start = max(0.01, dim * 0.01)
+    cam.data.clip_end = max(1000.0, dim * 50.0)
 
-          # Auto-Repair 10: Redirect FBX imports to GLTF if converted or if model exists as GLB
-          has_glb = os.path.exists('input_model.glb') or os.path.exists('inputs/input_model.glb')
-          if has_glb:
-              bpy_script = bpy_script.replace("bpy.ops.import_scene.fbx(", "bpy.ops.import_scene.gltf(")
-              bpy_script = re.sub(r"(['\"])([^'\"\n]*?)\.fbx(['\"])", r"\1\2.glb\3", bpy_script)
-              print("Auto-Repair: Successfully redirected scene FBX import to converted GLB format.")
+# Export 3D Scene to model.glb
+for o in list(bpy.data.objects):
+    if o.type == 'MESH' and any(k in o.name.lower() for k in ['fog', 'volume', 'domain', 'atmosphere']):
+        bpy.data.objects.remove(o, do_unlink=True)
+bpy.ops.export_scene.gltf(
+    filepath='output/model.glb',
+    export_format='GLB',
+    export_apply=False,
+    export_skins=True,
+    export_animations=True,
+    export_materials='EXPORT'
+)
+print("SUCCESS: 3D Scene exported to output/model.glb")
 
-          # Auto-Repair 11: SCOPED Texture Type Fix
-          valid_tex = {'NONE', 'BLEND', 'CLOUDS', 'DISTORTED_NOISE', 'IMAGE', 'MAGIC', 'MARBLE', 'MUSGRAVE', 'NOISE', 'STUCCI', 'VORONOI', 'WOOD'}
-          def fix_texture_type(m):
-              prefix = m.group(1)
-              tex_val = m.group(2)
-              suffix = m.group(3)
-              if tex_val not in valid_tex:
-                  tex_val = 'CLOUDS'
-              return prefix + tex_val + suffix
-          bpy_script = re.sub(r"(textures\.new\([^)]*type\s*=\s*['\"])([A-Za-z0-9_]+)(['\"])", fix_texture_type, bpy_script)
+# Render Still Preview Snapshot
+sc.render.engine = 'CYCLES'
+sc.cycles.device = 'CPU'
+sc.cycles.samples = 4
+sc.cycles.max_bounces = 4
+sc.render.resolution_x = 960
+sc.render.resolution_y = 540
+sc.render.filepath = 'output/render.png'
+sc.frame_set(sc.frame_start)
+bpy.ops.render.render(write_still=True)
+print("SUCCESS: Preview snapshot complete: output/render.png")
 
-          # Auto-Repair 12: Fix Background shader socket name ('Color' -> 'Background')
-          bpy_script = re.sub(r"(\.outputs\[['\"])Color(['\"]\]\s*,\s*[^,\n]*?inputs\[['\"])Surface(['\"]\])", r"\1Background\2Surface\3", bpy_script)
-          bpy_script = re.sub(r"(bg(?:_node)?\\.outputs\[['\"])Color(['\"]\])", r"\1Background\2", bpy_script)
+# Dynamic Animation Render (Strictly from frame_start to frame_end, zero arbitrary caps)
+has_anim = any(obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0 for obj in bpy.data.objects)
+if has_anim and not os.path.exists('output/cinematic.mp4'):
+    total_frames = max(1, sc.frame_end - sc.frame_start + 1)
+    print(f"Active Animation Detected: Rendering {total_frames} dynamic frames (frame {sc.frame_start} to {sc.frame_end})...")
+    sc.render.image_settings.file_format = 'FFMPEG'
+    sc.render.ffmpeg.format = 'MPEG4'
+    sc.render.ffmpeg.codec = 'H264'
+    sc.render.ffmpeg.constant_rate_factor = 'MEDIUM'
+    sc.render.ffmpeg.ffmpeg_preset = 'REALTIME'
+    sc.render.filepath = 'output/cinematic.mp4'
+    sc.cycles.samples = 2
+    sc.cycles.max_bounces = 3
+    bpy.ops.render.render(animation=True)
+    print("SUCCESS: Dynamic MP4 video rendered: output/cinematic.mp4")
+'''
 
-          # Auto-Repair 13: Neutralize read-only sequencer_colorspace_settings assignment
-          bpy_script = re.sub(r"^[ \t]*.*?\.sequencer_colorspace_settings\s*=.*$", "pass", bpy_script, flags=re.MULTILINE)
-
-          # Auto-Repair 14: Fix scene.exposure -> scene.view_settings.exposure
-          bpy_script = re.sub(r"(\bscene)\.exposure\b", r"\1.view_settings.exposure", bpy_script)
-
-          # Auto-Repair 15: Additional Principled BSDF socket link protections
-          bpy_script = re.sub(r"inputs\[['\"]Transmission['\"]\]", "inputs['Transmission Weight']", bpy_script)
-          bpy_script = re.sub(r"inputs\[['\"]Subsurface['\"]\]", "inputs['Subsurface Weight']", bpy_script)
-          bpy_script = re.sub(r"inputs\[['\"]Specular['\"]\]", "inputs['Specular IOR Level']", bpy_script)
-
-          # Auto-Repair 16: Fix hallucinated object.keyframe_[xyz] axis attribute assignments
-          axis_index_map = {'x': 0, 'y': 1, 'z': 2, 'X': 0, 'Y': 1, 'Z': 2}
-          def fix_keyframe_axis(m):
-              obj = m.group(1)
-              axis = m.group(2)
-              val = m.group(3).strip()
-              idx = axis_index_map.get(axis, 1)
-              return f"{obj}.location.{axis.lower()} = {val}; {obj}.keyframe_insert(data_path='location', index={idx})"
-          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_([xyzXYZ])\s*=\s*([^\n;]+)", fix_keyframe_axis, bpy_script)
-
-          # Auto-Repair 17: Fix hallucinated object.keyframe_[location|rotation|scale] property assignments
-          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_location\s*=\s*([^\n;]+)", r"\1.location = \2; \1.keyframe_insert(data_path='location')", bpy_script)
-          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_rotation\s*=\s*([^\n;]+)", r"\1.rotation_euler = \2; \1.keyframe_insert(data_path='rotation_euler')", bpy_script)
-          bpy_script = re.sub(r"([a-zA-Z0-9_]+)\.keyframe_scale\s*=\s*([^\n;]+)", r"\1.scale = \2; \1.keyframe_insert(data_path='scale')", bpy_script)
-
-          # Auto-Repair 18: Auto-heal f_mat variable typo (f_mat -> fog_mat)
-          bpy_script = re.sub(r"\bf_mat\b", "fog_mat", bpy_script)
-
-          # Auto-Repair 19: Auto-repair world.node_tree.nodes.link -> world.node_tree.links.new
-          bpy_script = re.sub(r"\.nodes\.link\(", ".links.new(", bpy_script)
-
-          # Auto-Repair 20: Auto-repair scene.render.shutter -> scene.render.motion_blur_shutter
-          bpy_script = re.sub(r"(\.render)\.shutter\b", r"\1.motion_blur_shutter", bpy_script)
-
-          # Auto-Repair 21: Neutralize cycles get_devices() NoneType crash & enforce headless CPU device
-          bpy_script = re.sub(
-              r"^[ \t]*.*cycles.*(?:device\s*=\s*['\"]GPU['\"]|get_devices\(\)).*$",
-              "try:\n    bpy.context.scene.cycles.device = 'CPU'\nexcept Exception: pass",
-              bpy_script,
-              flags=re.MULTILINE
-          )
-          bpy_script = bpy_script.replace("get_devices()", "(bpy.context.preferences.addons['cycles'].preferences.get_devices() or [])")
-
-          # Auto-Repair 22: Fix hallucinated nodes.ShaderNode* direct constructors
-          def fix_shader_node_constructor(m):
-              nodes_var = m.group(1)
-              node_type = m.group(2)
-              args = m.group(3).strip()
-              loc_match = re.search(r'location\s*=\s*(\([^)]+\))', args)
-              if loc_match:
-                  loc = loc_match.group(1)
-                  return f"({nodes_var}.new(type='{node_type}'), setattr({nodes_var}.new(type='{node_type}'), 'location', {loc}))[0]"
-              return f"{nodes_var}.new(type='{node_type}')"
-
-          bpy_script = re.sub(
-              r"([a-zA-Z0-9_]*nodes?)\.(ShaderNode[A-Za-z0-9_]+)\(([^)]*)\)",
-              fix_shader_node_constructor,
-              bpy_script
-          )
-
-          # -------------------------------------------------------------------------
-          # UNIVERSAL DYNAMIC STAGING: SAFE CAMERA, LIGHTING & EXPORT (ZERO HARDCODING)
-          # -------------------------------------------------------------------------
-          dynamic_post_stage = (
-              "\n\n# --- VYNARA DYNAMIC SCENE VALIDATION & RENDER STAGING ---\n"
-              "try:\n"
-              "    import mathutils, math, bpy, os\n"
-              "    _sc = bpy.context.scene\n"
-              "    # 1. Guarantee World Background Lighting (Prevents pitch black renders in Cycles)\n"
-              "    if not _sc.world:\n"
-              "        _sc.world = bpy.data.worlds.new('Vynara_World')\n"
-              "    _sc.world.use_nodes = True\n"
-              "    _bg = _sc.world.node_tree.nodes.get('Background')\n"
-              "    if not _bg:\n"
-              "        _bg = _sc.world.node_tree.nodes.new('ShaderNodeBackground')\n"
-              "        _out = _sc.world.node_tree.nodes.get('World Output')\n"
-              "        if not _out:\n"
-              "            _out = _sc.world.node_tree.nodes.new('ShaderNodeOutputWorld')\n"
-              "        _sc.world.node_tree.links.new(_bg.outputs['Background'], _out.inputs['Surface'])\n"
-              "    _bg.inputs['Color'].default_value = (0.70, 0.85, 1.0, 1.0)\n"
-              "    _bg.inputs['Strength'].default_value = max(float(_bg.inputs['Strength'].default_value), 1.2)\n\n"
-              "    # 2. Guarantee Key Sunlight if no active light exists\n"
-              "    if not any(o.type == 'LIGHT' for o in bpy.data.objects):\n"
-              "        _sdata = bpy.data.lights.new('Key_Sun', 'SUN')\n"
-              "        _sdata.energy = 5.5\n"
-              "        _sdata.color = (1.0, 0.96, 0.90)\n"
-              "        _sun = bpy.data.objects.new('Key_Sun', _sdata)\n"
-              "        bpy.context.collection.objects.link(_sun)\n"
-              "        _sun.rotation_euler = (math.radians(52.0), math.radians(18.0), math.radians(-38.0))\n\n"
-              "    # 3. Guarantee Active Camera with Far Clip (10km) so long expressways are never clipped\n"
-              "    _cam = _sc.camera\n"
-              "    if not _cam:\n"
-              "        for _o in bpy.data.objects:\n"
-              "            if _o.type == 'CAMERA':\n"
-              "                _cam = _o; break\n"
-              "    if not _cam:\n"
-              "        _cdata = bpy.data.cameras.new('Dynamic_Camera')\n"
-              "        _cam = bpy.data.objects.new('Dynamic_Camera', _cdata)\n"
-              "        bpy.context.collection.objects.link(_cam)\n"
-              "        _cam.location = (-4.0, 5.0, 2.5)\n"
-              "        _cam.rotation_euler = (math.radians(75), 0, math.radians(-25))\n"
-              "    _sc.camera = _cam\n"
-              "    if _cam and _cam.data:\n"
-              "        _cam.data.clip_end = max(_cam.data.clip_end, 10000.0)\n\n"
-              "    # 4. Safe Export of Entire Dynamic Scene to model.glb\n"
-              "    for _o in list(bpy.data.objects):\n"
-              "        if _o.type == 'MESH' and any(_k in _o.name.lower() for _k in ['fog', 'volume', 'domain', 'atmosphere']):\n"
-              "            bpy.data.objects.remove(_o, do_unlink=True)\n"
-              "    bpy.ops.export_scene.gltf(\n"
-              "        filepath='output/model.glb',\n"
-              "        export_format='GLB',\n"
-              "        export_apply=False,\n"
-              "        export_skins=True,\n"
-              "        export_animations=True,\n"
-              "        export_materials='EXPORT'\n"
-              "    )\n"
-              "    print('SUCCESS: Dynamic 3D Scene exported to output/model.glb')\n\n"
-              "    # 5. Snapshot Still Preview Render\n"
-              "    _sc.render.engine = 'CYCLES'\n"
-              "    _sc.cycles.device = 'CPU'\n"
-              "    _sc.cycles.samples = 4\n"
-              "    _sc.cycles.max_bounces = 4\n"
-              "    _sc.cycles.diffuse_bounces = 2\n"
-              "    _sc.cycles.glossy_bounces = 2\n"
-              "    _sc.cycles.use_denoising = False\n"
-              "    _sc.render.resolution_x = 960\n"
-              "    _sc.render.resolution_y = 540\n"
-              "    _sc.render.filepath = 'output/render.png'\n"
-              "    _sc.frame_set(_sc.frame_start)\n"
-              "    bpy.ops.render.render(write_still=True)\n"
-              "    print('SUCCESS: Dynamic preview snapshot complete: output/render.png')\n\n"
-              "    # 6. Dynamic Animation Render (Render across script's actual frame_start to frame_end)\n"
-              "    _has_anim = any(\n"
-              "        (obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0)\n"
-              "        for obj in bpy.data.objects\n"
-              "    )\n"
-              "    if _has_anim and not os.path.exists('output/cinematic.mp4'):\n"
-              "        _total_frames = _sc.frame_end - _sc.frame_start + 1\n"
-              "        print(f'Active Animation Detected: Rendering {min(_total_frames, 90)} dynamic frames...')\n"
-              "        if _total_frames > 90:\n"
-              "            _sc.frame_end = _sc.frame_start + 89\n"
-              "        _sc.render.image_settings.file_format = 'FFMPEG'\n"
-              "        _sc.render.ffmpeg.format = 'MPEG4'\n"
-              "        _sc.render.ffmpeg.codec = 'H264'\n"
-              "        _sc.render.ffmpeg.constant_rate_factor = 'MEDIUM'\n"
-              "        _sc.render.ffmpeg.ffmpeg_preset = 'REALTIME'\n"
-              "        _sc.render.filepath = 'output/cinematic.mp4'\n"
-              "        _sc.cycles.samples = 2\n"
-              "        _sc.cycles.max_bounces = 3\n"
-              "        bpy.ops.render.render(animation=True)\n"
-              "        print('SUCCESS: Dynamic MP4 video rendered: output/cinematic.mp4')\n"
-              "except Exception as _stage_err:\n"
-              "    print(f'Dynamic staging note: {_stage_err}')\n"
-          )
-          bpy_script += dynamic_post_stage
-
-          # Checkpoint Project for Interactive Iteration
-          if 'bpy.ops.wm.save_as_mainfile' not in bpy_script:
-              bpy_script += (
-                  "\n\ntry:\n"
-                  "    import bpy\n"
-                  "    bpy.ops.wm.save_as_mainfile(filepath='output/project.blend')\n"
-                  "except Exception: pass\n"
-              )
-
-          with open('run_task.py', 'w', encoding='utf-8') as f:
-              f.write(bpy_script)
-
-          try:
-              py_compile.compile('run_task.py', doraise=True)
-              print("Python Syntax Pre-Check: PASSED")
-          except py_compile.PyCompileError as pe:
-              print(f"Syntax Validation Warning: {pe}")
-
+          with open('run_task.py', 'w', encoding='utf-8') as rf:
+              rf.write(runner_code)
           EOF
 
-          # Run headless Blender wrapped inside virtual X display buffer for full OpenGL shader compilation
+          # Run headless Blender with live controller
           xvfb-run -a --server-args="-screen 0 1920x1080x24 -ac +extension GLX +render" /opt/blender/blender -b -P run_task.py 2>&1 | tee output/blender_execution.log || true
 
-          # Extract clean Python traceback for Solution B if any exception occurred
+          # Capture exact terminal traceback if failed
           python3 - << 'EOF'
           import re, os
           if os.path.exists('output/blender_execution.log'):
               with open('output/blender_execution.log', 'r', encoding='utf-8', errors='ignore') as lf:
                   content = lf.read()
-              
               tb_match = re.search(r'(Traceback \(most recent call last\):[\s\S]+?(?:[A-Za-z0-9_]+Error|[A-Za-z0-9_]+Exception):[^\n]+)', content)
               if tb_match:
-                  traceback_str = tb_match.group(1).strip()
                   with open('output/error.txt', 'w', encoding='utf-8') as ef:
-                      ef.write(traceback_str + '\n')
-                  print("EXTRACTED TRACEBACK TO error.txt:\n" + traceback_str)
+                      ef.write(tb_match.group(1).strip() + '\n')
+                  print("EXTRACTED TRACEBACK TO error.txt:\n" + tb_match.group(1).strip())
           EOF
 
-          # Normalize any exported .glb to model.glb so the Android app can consume it
+          # Normalize any exported .glb to model.glb
           if [ ! -f output/model.glb ]; then
             FIRST_GLB=$(ls output/*.glb 2>/dev/null | head -n 1)
             if [ -n "$FIRST_GLB" ]; then
@@ -516,7 +425,7 @@ jobs:
             exit 1
           fi
 
-      # Step 6: Upload both GLB model, Cycles render, Cinematic MP4 video, and execution logs
+      # Step 6: Upload finished assets (GLB model, Cycles preview, Cinematic MP4 video, and logs)
       - name: Upload Finished Model and Render Preview
         if: always()
         uses: actions/upload-artifact@v4
