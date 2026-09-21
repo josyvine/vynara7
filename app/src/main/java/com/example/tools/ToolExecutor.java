@@ -535,7 +535,7 @@ public class ToolExecutor {
                         final boolean finalIsRaw = isRawScript;
                         final String finalPrompt = prompt;
                         final String selectedModel = keyManager.getSelectedModel();
-                        final String geminiKey = keyManager.getApiKey();
+                        final String effectiveModeStr = (activeMode == AIPipelineMode.PROCEDURAL_PYTHON || isRawScript) ? "OPTION_A" : activeMode.getId();
 
                         ghBridge.dispatchGenerationWorkflowWithModel(
                                 targetRepo,
@@ -545,10 +545,10 @@ public class ToolExecutor {
                                 dispatchScript,
                                 finalInputModel,
                                 finalIsRaw,
-                                activeMode.getId(),
+                                effectiveModeStr,
                                 finalPrompt,
                                 selectedModel,
-                                geminiKey,
+                                null,
                                 new GitHubWorkflowBridge.WorkflowDispatchCallback() {
                             @Override
                             public void onDispatched(String eType, String aId) {
