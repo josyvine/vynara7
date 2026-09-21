@@ -25,7 +25,8 @@ public class AICorrector {
     private final AIOrchestrator aiOrchestrator;
     private final Scene activeScene;
 
-    private static final int SCRIPT_REPAIR_TIMEOUT_SECONDS = 35;
+    // Increased from 35s to 90s to comfortably handle Gemini server traffic spikes without premature aborts
+    private static final int SCRIPT_REPAIR_TIMEOUT_SECONDS = 90;
 
     public AICorrector(ToolExecutor toolExecutor, AIOrchestrator aiOrchestrator) {
         this(toolExecutor, aiOrchestrator, null);
@@ -153,7 +154,7 @@ public class AICorrector {
     /**
      * VISUAL CRITIQUE & REFINEMENT (Async)
      * Compares the Cycles preview render against the reference photo using Gemini Vision to spot and fix
-     * aesthetic defects (boxiness, wheel alignment, bad lighting). Supports prompt-free scripts.
+     * aesthetic defects. Supports prompt-free scripts.
      */
     public void critiqueAndRefineBlenderScript(String userPrompt,
                                               String currentScript,
@@ -252,8 +253,9 @@ public class AICorrector {
                 "4. BLENDER 4.2+ COMPLIANCE:\n" +
                 "   - Under AgX, view_settings.look must be one of: 'None', 'AgX - Punchy', 'AgX - High Contrast', 'AgX - Medium High Contrast', 'AgX - Base Contrast', 'AgX - Low Contrast'.\n" +
                 "   - Socket names conform strictly to Blender 4.2+ ('Transmission Weight', 'Roughness', 'Metallic', 'Base Color').\n" +
+                "   - Principled BSDF 'Base Color' socket is strictly RGBA (requires 4-tuple: `(R, G, B, 1.0)`). NEVER pass a 3-tuple to Base Color default_value.\n" +
                 "   - If `update_from_data` failed, use `obj.data.update()`.\n" +
-                "   - If color socket tuple size failed, pass a 3-tuple `(r, g, b)` to RGB color sockets, not a 4-tuple.\n" +
+                "   - If `node_nodes` failed, use `mat.use_nodes` or `mat.node_tree.nodes`.\n" +
                 "5. ASSET INGESTION & FORMAT FALLBACKS:\n" +
                 "   - If the error states `ASCII FBX files are not supported`, replace `import_scene.fbx` with `bpy.ops.import_scene.gltf(filepath='inputs/input_model.glb')` (or 'input_model.glb').\n" +
                 "6. LIGHTING & CAMERA:\n" +
@@ -290,9 +292,13 @@ public class AICorrector {
                 sb.append("HEALING DIRECTIVE FOR UPDATE FROM DATA:\n")
                   .append("- Replace `obj.update_from_data()` with `obj.data.update()`.\n\n");
             }
-            if (errorTraceback.contains("dimension 0 should contain 3 items") || errorTraceback.contains("ValueError: bpy_struct")) {
-                sb.append("HEALING DIRECTIVE FOR SOCKET TUPLE DIMENSION:\n")
-                  .append("- Pass 3-element tuple `(r, g, b)` to Color socket default_value instead of 4-element `(r, g, b, a)`.\n\n");
+            if (errorTraceback.contains("node_nodes")) {
+                sb.append("HEALING DIRECTIVE FOR MATERIAL NODES:\n")
+                  .append("- Replace `mat.node_nodes` with `mat.use_nodes = True` and `nodes = mat.node_tree.nodes`.\n\n");
+            }
+            if (errorTraceback.contains("should contain 4 items, not 3") || errorTraceback.contains("Base Color")) {
+                sb.append("HEALING DIRECTIVE FOR BASE COLOR 4-TUPLE:\n")
+                  .append("- Pass a 4-element RGBA tuple `(r, g, b, 1.0)` to `bsdf.inputs['Base Color'].default_value` including alpha.\n\n");
             }
             if (errorTraceback.toLowerCase().contains("timeout") || errorTraceback.contains("600s")) {
                 sb.append("HEALING DIRECTIVE FOR TIMEOUT OPTIMIZATION:\n")
@@ -337,8 +343,9 @@ public class AICorrector {
             }
         }
 
-        // Auto-sanitize update_from_data
-        cleaned = cleaned.replace(".update_from_data()", ".data.update()");
+        // Auto-sanitize update_from_data and node_nodes
+        cleaned = cleaned.replace(".update_from_data()", ".data.update()")
+                         .replace(".node_nodes", ".use_nodes");
 
         // Auto-sanitize legacy color looks to Blender 4.2 AgX
         cleaned = cleaned.replaceAll("view_settings\\.look\\s*=\\s*['\"]High Contrast['\"]", "view_settings.look = 'AgX - High Contrast'");
@@ -368,10 +375,10 @@ public class AICorrector {
                          .replaceAll("inputs\\[['\"]Subsurface['\"]\\]", "inputs['Subsurface Weight']")
                          .replaceAll("inputs\\[['\"]Specular['\"]\\]", "inputs['Specular IOR Level']");
 
-        // Auto-sanitize 4-tuple on 3-tuple socket default_value assignment
+        // Auto-sanitize Base Color ensuring it is ALWAYS a 4-tuple (RGBA)
         cleaned = cleaned.replaceAll(
-                "(\\.inputs\\[(?:\\d+|['\"][^'\"]+['\"])\\]\\.default_value\\s*=\\s*\\(\\s*[-+]?[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?\\s*,\\s*[-+]?[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?\\s*,\\s*[-+]?[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\\s*,\\s*[-+]?[0-9]*\\.?[0-9]+(?:[eE][-+]?[0-9]+)?\\s*\\)",
-                "$1)"
+                "(inputs\\s*\\[\\s*['\"]Base Color['\"]\\s*\\]\\.default_value\\s*=\\s*\\(\\s*[-+]?[0-9]*\\.?[0-9]+\\s*,\\s*[-+]?[0-9]*\\.?[0-9]+\\s*,\\s*[-+]?[0-9]*\\.?[0-9]+\\s*)\\)",
+                "$1, 1.0)"
         );
 
         // Auto-sanitize hallucinated object.keyframe_[xyz] axis assignments
