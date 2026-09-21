@@ -172,8 +172,8 @@ public class GitHubWorkflowBridge {
         String selectedModel = null;
         String geminiApiKey = null;
         try {
-            ApiKeyManager keyMgr = ApiKeyManager.getInstance(context);
-            if (keyMgr != null) {
+            if (context != null) {
+                ApiKeyManager keyMgr = new ApiKeyManager(context);
                 selectedModel = keyMgr.getSelectedModel();
                 geminiApiKey = keyMgr.getApiKey();
             }
