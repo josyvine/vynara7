@@ -114,6 +114,10 @@ jobs:
                   print(f"Event payload read warning: {pe}")
 
           is_raw_script = bool(payload.get('isRawScript', payload.get('is_raw_script', False)))
+          pipeline_mode = str(payload.get('pipeline_mode', '')).upper()
+          if pipeline_mode in ['OPTION_A', 'PIPELINE_OPT_A_PROCEDURAL', 'PROCEDURAL_PYTHON']:
+              is_raw_script = True
+
           user_prompt = payload.get('user_prompt', payload.get('prompt', '')).strip()
           selected_model = payload.get('selected_model', 'gemini-2.5-flash').strip()
           gemini_api_key = payload.get('gemini_api_key', '').strip() or os.environ.get('GEMINI_API_KEY', '').strip()
