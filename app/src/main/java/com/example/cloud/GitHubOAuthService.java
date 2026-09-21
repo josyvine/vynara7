@@ -10,11 +10,14 @@ import android.util.Base64;
 import com.example.ai.ApiKeyManager;
 import com.example.cloud.models.DeviceCodeResponse;
 import com.example.utils.VynaraLogger;
+import com.goterl.lazysodium.LazySodiumAndroid;
+import com.goterl.lazysodium.SodiumAndroid;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -37,7 +40,8 @@ public class GitHubOAuthService {
     private static final String USER_REPOS_URL = "https://api.github.com/user/repos?per_page=100&sort=updated";
 
     public static final String DEFAULT_REDIRECT_URI = "vynara://oauth-callback";
-    public static final String DEFAULT_SCOPES = "repo,workflow,user";
+    // Scopes must be space-separated in OAuth 2.0 / GitHub
+    public static final String DEFAULT_SCOPES = "repo workflow user";
 
     private static final String PREFS_NAME = "vynara_github_auth_prefs";
     private static final String KEY_CLIENT_ID = "github_client_id";
@@ -54,7 +58,7 @@ public class GitHubOAuthService {
             "\n" +
             "on:\n" +
             "  repository_dispatch:\n" +
-            "    types: [vynara_generate]\n" +
+            "    types: [vynara_generate, vynara_agentic_auto, vynara_agentic_interactive, vynara_neural_reconstruct]\n" +
             "\n" +
             "jobs:\n" +
             "  build_3d_asset:\n" +
@@ -78,9 +82,18 @@ public class GitHubOAuthService {
             "          curl -sL https://download.blender.org/release/Blender4.2/blender-4.2.0-linux-x64.tar.xz | sudo tar -xJ --strip-components=1 -C /opt/blender\n" +
             "\n" +
             "      - name: Execute Blender Python Script\n" +
+            "        env:\n" +
+            "          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}\n" +
             "        run: |\n" +
             "          mkdir -p output\n" +
-            "          echo \"${{ github.event.client_payload.bpy_script }}\" > run_task.py\n" +
+            "          SCRIPT_CONTENT=\"${{ github.event.client_payload.bpy_script }}\"\n" +
+            "          if [[ \"$SCRIPT_CONTENT\" == b64:* ]]; then\n" +
+            "            echo \"${SCRIPT_CONTENT#b64:}\" | base64 -d > run_task.py\n" +
+            "          elif [ -n \"${{ github.event.client_payload.bpy_script_b64 }}\" ]; then\n" +
+            "            echo \"${{ github.event.client_payload.bpy_script_b64 }}\" | base64 -d > run_task.py\n" +
+            "          else\n" +
+            "            echo \"$SCRIPT_CONTENT\" > run_task.py\n" +
+            "          fi\n" +
             "          /opt/blender/blender -b -P run_task.py -- output/model.glb\n" +
             "\n" +
             "      - name: Upload Finished Model\n" +
@@ -121,6 +134,11 @@ public class GitHubOAuthService {
 
     public interface ProvisionCallback {
         void onSuccess(String repoFullName);
+        void onError(String errorMessage);
+    }
+
+    public interface SecretCallback {
+        void onSuccess();
         void onError(String errorMessage);
     }
 
@@ -586,7 +604,7 @@ public class GitHubOAuthService {
         });
     }
 
-    // --- Method 2: Automatic Background Workspace & Workflow Provisioning ---
+    // --- Automatic Workspace & Secrets Provisioning ---
 
     public void provisionUserWorkspace(Context context, String accessToken, String userLogin, ProvisionCallback callback) {
         if (accessToken == null || accessToken.trim().isEmpty() || userLogin == null || userLogin.trim().isEmpty()) {
@@ -644,7 +662,7 @@ public class GitHubOAuthService {
 
             Request request = new Request.Builder()
                     .url("https://api.github.com/user/repos")
-            .header("Authorization", "Bearer " + accessToken.trim())
+                    .header("Authorization", "Bearer " + accessToken.trim())
                     .header("Accept", "application/vnd.github+json")
                     .header("User-Agent", "Vynara-3D-Studio-Android")
                     .post(body)
@@ -688,32 +706,36 @@ public class GitHubOAuthService {
         httpClient.newCall(request).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                commitWorkflowFile(context, accessToken, repoFullName, callback);
+                commitWorkflowFile(context, accessToken, userLogin, repoFullName, null, callback);
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException {
-                if (response.isSuccessful()) {
-                    response.close();
-                    VynaraLogger.system("GitHubOAuthService: Workflow file already exists in " + repoFullName);
-                    saveAndFinishProvisioning(context, accessToken, userLogin, repoFullName, callback);
-                } else {
-                    response.close();
-                    VynaraLogger.system("GitHubOAuthService: Workflow file missing. Pushing vynara_worker.yml...");
-                    commitWorkflowFile(context, accessToken, repoFullName, callback);
-                }
+                String existingSha = null;
+                try (ResponseBody body = response.body()) {
+                    if (response.isSuccessful() && body != null) {
+                        JSONObject json = new JSONObject(body.string());
+                        existingSha = json.optString("sha", null);
+                    }
+                } catch (Exception ignored) {}
+
+                VynaraLogger.system("GitHubOAuthService: Syncing vynara_worker.yml to " + repoFullName + (existingSha != null ? " (Updating)" : " (Creating)"));
+                commitWorkflowFile(context, accessToken, userLogin, repoFullName, existingSha, callback);
             }
         });
     }
 
-    private void commitWorkflowFile(Context context, String accessToken, String repoFullName, ProvisionCallback callback) {
+    private void commitWorkflowFile(Context context, String accessToken, String userLogin, String repoFullName, String existingSha, ProvisionCallback callback) {
         try {
-            String encodedYaml = Base64.encodeToString(WORKFLOW_YAML_CONTENT.getBytes(), Base64.NO_WRAP);
+            String encodedYaml = Base64.encodeToString(WORKFLOW_YAML_CONTENT.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
 
             JSONObject json = new JSONObject();
-            json.put("message", "Initialize Vynara Blender worker workflow");
+            json.put("message", "Initialize/Update Vynara Blender worker workflow");
             json.put("content", encodedYaml);
             json.put("branch", "main");
+            if (existingSha != null && !existingSha.trim().isEmpty()) {
+                json.put("sha", existingSha.trim());
+            }
 
             RequestBody body = RequestBody.create(json.toString(), JSON_MEDIA_TYPE);
 
@@ -739,7 +761,7 @@ public class GitHubOAuthService {
                     response.close();
                     if (code == 200 || code == 201) {
                         VynaraLogger.system("GitHubOAuthService: Workflow file successfully committed to " + repoFullName);
-                        saveAndFinishProvisioning(context, accessToken, repoFullName.split("/")[0], repoFullName, callback);
+                        saveAndFinishProvisioning(context, accessToken, userLogin, repoFullName, callback);
                     } else {
                         mainHandler.post(() -> callback.onError("GitHub returned HTTP " + code + " committing workflow"));
                     }
@@ -750,12 +772,136 @@ public class GitHubOAuthService {
         }
     }
 
+    // --- GitHub Actions Secrets Encryption & Upload ---
+
+    public void uploadSecretToRepo(String accessToken, String repoFullName, String secretName, String secretValue, SecretCallback callback) {
+        if (accessToken == null || accessToken.trim().isEmpty() || repoFullName == null || repoFullName.trim().isEmpty()) {
+            if (callback != null) callback.onError("Invalid credentials for secret upload.");
+            return;
+        }
+        if (secretName == null || secretName.trim().isEmpty() || secretValue == null || secretValue.trim().isEmpty()) {
+            if (callback != null) callback.onError("Secret name or value is empty.");
+            return;
+        }
+
+        String publicKeyUrl = "https://api.github.com/repos/" + repoFullName.trim() + "/actions/secrets/public-key";
+
+        Request getReq = new Request.Builder()
+                .url(publicKeyUrl)
+                .header("Authorization", "Bearer " + accessToken.trim())
+                .header("Accept", "application/vnd.github+json")
+                .header("User-Agent", "Vynara-3D-Studio-Android")
+                .get()
+                .build();
+
+        httpClient.newCall(getReq).enqueue(new Callback() {
+            @Override
+            public void onFailure(Call call, IOException e) {
+                if (callback != null) {
+                    mainHandler.post(() -> callback.onError("Failed to fetch repo public key: " + e.getMessage()));
+                }
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException {
+                try (ResponseBody body = response.body()) {
+                    if (!response.isSuccessful() || body == null) {
+                        int code = response.code();
+                        if (callback != null) {
+                            mainHandler.post(() -> callback.onError("Failed to get public key, HTTP " + code));
+                        }
+                        return;
+                    }
+
+                    String jsonStr = body.string();
+                    JSONObject json = new JSONObject(jsonStr);
+                    String keyId = json.optString("key_id", "");
+                    String publicKeyBase64 = json.optString("key", "");
+
+                    if (keyId.isEmpty() || publicKeyBase64.isEmpty()) {
+                        if (callback != null) {
+                            mainHandler.post(() -> callback.onError("Invalid public key payload from GitHub."));
+                        }
+                        return;
+                    }
+
+                    // Encrypt secret with Libsodium crypto_box_seal (sealed box)
+                    byte[] publicKeyBytes = Base64.decode(publicKeyBase64, Base64.NO_WRAP);
+                    byte[] secretBytes = secretValue.trim().getBytes(StandardCharsets.UTF_8);
+
+                    LazySodiumAndroid lazySodium = new LazySodiumAndroid(new SodiumAndroid());
+                    byte[] cipherBytes = new byte[secretBytes.length + 48]; // crypto_box_SEALBYTES = 48
+                    boolean ok = lazySodium.cryptoBoxSeal(cipherBytes, secretBytes, secretBytes.length, publicKeyBytes);
+
+                    if (!ok) {
+                        if (callback != null) {
+                            mainHandler.post(() -> callback.onError("Libsodium encryption failed."));
+                        }
+                        return;
+                    }
+
+                    String encryptedValue = Base64.encodeToString(cipherBytes, Base64.NO_WRAP);
+
+                    JSONObject putJson = new JSONObject();
+                    putJson.put("encrypted_value", encryptedValue);
+                    putJson.put("key_id", keyId);
+
+                    RequestBody putBody = RequestBody.create(putJson.toString(), JSON_MEDIA_TYPE);
+                    String putUrl = "https://api.github.com/repos/" + repoFullName.trim() + "/actions/secrets/" + secretName.trim();
+
+                    Request putReq = new Request.Builder()
+                            .url(putUrl)
+                            .header("Authorization", "Bearer " + accessToken.trim())
+                            .header("Accept", "application/vnd.github+json")
+                            .header("User-Agent", "Vynara-3D-Studio-Android")
+                            .put(putBody)
+                            .build();
+
+                    httpClient.newCall(putReq).enqueue(new Callback() {
+                        @Override
+                        public void onFailure(Call call, IOException e) {
+                            if (callback != null) {
+                                mainHandler.post(() -> callback.onError("Failed to upload secret: " + e.getMessage()));
+                            }
+                        }
+
+                        @Override
+                        public void onResponse(Call call, Response putResp) throws IOException {
+                            int code = putResp.code();
+                            putResp.close();
+                            if (code == 201 || code == 204) {
+                                VynaraLogger.system("GitHubOAuthService: Secret " + secretName + " uploaded successfully to " + repoFullName);
+                                if (callback != null) {
+                                    mainHandler.post(callback::onSuccess);
+                                }
+                            } else {
+                                if (callback != null) {
+                                    mainHandler.post(() -> callback.onError("GitHub returned HTTP " + code + " storing secret."));
+                                }
+                            }
+                        }
+                    });
+                } catch (Exception e) {
+                    if (callback != null) {
+                        mainHandler.post(() -> callback.onError("Encryption/upload error: " + e.getMessage()));
+                    }
+                }
+            }
+        });
+    }
+
     private void saveAndFinishProvisioning(Context context, String accessToken, String userLogin, String repoFullName, ProvisionCallback callback) {
         if (context != null) {
             ApiKeyManager keyMgr = new ApiKeyManager(context);
             keyMgr.saveGitHubUser(userLogin, getAvatarUrl(context));
             keyMgr.saveGitHubConfig(repoFullName, accessToken, "vynara_generate");
             keyMgr.saveComputeProvider(CloudProvider.GITHUB_ACTIONS);
+
+            // If user already entered a Gemini API key previously, automatically push it as a secret now
+            String existingGeminiKey = keyMgr.getApiKey();
+            if (existingGeminiKey != null && !existingGeminiKey.trim().isEmpty()) {
+                uploadSecretToRepo(accessToken, repoFullName, "GEMINI_API_KEY", existingGeminiKey.trim(), null);
+            }
         }
 
         mainHandler.post(() -> callback.onSuccess(repoFullName));
