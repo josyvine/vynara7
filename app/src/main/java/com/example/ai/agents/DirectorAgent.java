@@ -80,11 +80,11 @@ public class DirectorAgent {
             promptBuilder.append("ACTIVE 3D MODEL ATTACHED: The scene contains an imported 3D asset: ")
                          .append(String.join(", ", attached3DModels))
                          .append(". Worker 1 will import the model from 'inputs/input_model.glb' (or 'input_model.glb').\n")
-                         .append("SPATIAL & KINEMATIC RULES TO DECOMPOSE DYNAMICALLY:\n")
-                         .append("1. CONTEXTUAL SCALE: Identify the subject category from the prompt and model name (supercar, airplane, boat, humanoid, creature, prop). Set real-world target length.\n")
-                         .append("2. ENVIRONMENT & PATH: If a road/track/runway/terrain is requested, define pathType, length (e.g. 500m, 1000m, 5000m), terrain elevation, and curvature (Bézier curves, hairpin bends, coastal cliffs, etc.).\n")
-                         .append("3. GROUNDING & MOTION: Snap asset flush to surface at start position, bind to master 'Model_Root', and animate displacement matching user prompt across the full timeline.\n")
-                         .append("4. CINEMATIC SHOT: Define camera lens, focal length, tracking style (e.g. low-angle tarmac pursuit at 15cm height, drone overhead, 3/4 chase), and lighting.\n");
+                         .append("UNIVERSAL SPATIAL & KINEMATIC RULES TO DECOMPOSE DYNAMICALLY:\n")
+                         .append("1. CONTEXTUAL SCALE: Identify the subject category from the prompt and model name (humanoid, creature, prop, product, architecture, vehicle, aircraft). Set realistic real-world target dimensions (e.g. mug=0.1m, human=1.8m, car=4.5m, building=30m).\n")
+                         .append("2. ENVIRONMENT & STAGING: Design surrounding geometry, terrain, or studio backdrop matching the prompt (pedestal, room, natural terrain, street, open landscape, or infinite studio plane).\n")
+                         .append("3. GROUNDING & MOTION: Snap the asset's lowest point flush to surface at Z=0.0, bind to master 'Model_Root', and define movement/animation matching user prompt across the full timeline.\n")
+                         .append("4. CINEMATIC SHOT: Define camera lens, focal length, tracking style (e.g. turntable orbit, action tracking, cinematic dolly, aerial view), and atmospheric lighting.\n");
         }
 
         if (!base64Images.isEmpty()) {
@@ -160,9 +160,8 @@ public class DirectorAgent {
         promptBuilder.append("USER PROMPT: ").append(userPrompt).append("\n");
         promptBuilder.append("IMPORTED ASSET NAME: ").append(modelName).append("\n");
         promptBuilder.append("INFERRED CATEGORY: ").append(modelCategory).append("\n");
-        promptBuilder.append("DIRECTIVE: Generate an expansive cinematic production plan matching the prompt. ")
-                     .append("Extract custom path curves (Bézier curves for sweeping or hairpin roads, runways, stages), ")
-                     .append("custom length (e.g. 1km - 5km), real-world scale normalization, dynamic camera tracking, and lighting.");
+        promptBuilder.append("DIRECTIVE: Generate a universal cinematic production plan matching the prompt. ")
+                     .append("Define real-world scale normalization, surrounding environment/staging, dynamic camera tracking, and lighting.");
 
         VynaraLogger.system("DirectorAgent: Formulating autonomous asset spec for [" + modelName + "]...");
 
@@ -210,41 +209,41 @@ public class DirectorAgent {
     }
 
     private String buildDirectorSystemInstruction() {
-        return "You are the 3D Master Art Director & Spatial Architect for Vynara 3D Studio.\n" +
+        return "You are the Universal 3D Master Art Director & Spatial Architect for Vynara 3D Studio.\n" +
                 "YOUR ROLE:\n" +
-                "- You analyze the user's prompt, imported 3D asset metadata, and reference photos to decompose the scene into an unconstrained, highly dynamic 4-Worker specification.\n" +
-                "- NEVER force a generic 250m flat straight box. You have full freedom to design 1km to 5km+ sweeping expressways, hairpin mountain passes, coastal cliffs, airport runways, ocean waters, or cyberpunk cityscapes based on the prompt.\n\n" +
+                "- You analyze the user's prompt, imported 3D asset metadata, and reference photos to decompose any subject into an unconstrained, highly dynamic 4-Worker specification.\n" +
+                "- Never force arbitrary vehicle highways or road rigs unless a vehicle/road is explicitly requested by the prompt. Adapt the environment, scale, and camera to the subject naturally (e.g. tabletop for props, room for furniture, landscape for nature, city/studio for characters).\n\n" +
                 "DYNAMIC DIRECTIVES:\n" +
                 "1. Subject & Scale Normalization:\n" +
-                "   - Classify subject category (supercar, airplane, boat, humanoid, creature, architecture, prop).\n" +
-                "   - Determine real-world target dimension (e.g. 4.5m car, 60m jet, 1.8m humanoid, 15m boat).\n" +
-                "2. Environment & Path Geometry:\n" +
-                "   - Define pathType ('spline_curve', 'hairpin_mountain', 'coastal_track', 'airport_runway', 'open_sky', 'pedestal').\n" +
-                "   - Set pathLengthMeters based on prompt (e.g. 1000m for expressway, 5000m for long mountain drive).\n" +
-                "   - Set terrainType ('coastal_cliff', 'mountain_pass', 'desert', 'cyber_city', 'studio').\n" +
+                "   - Classify subject category (humanoid, creature, prop, product, architecture, vehicle, aircraft).\n" +
+                "   - Determine real-world target dimension in meters based on the actual object (e.g. coffee mug = 0.1m, shoe = 0.3m, sword = 1.0m, human = 1.8m, car = 4.5m, building = 30m).\n" +
+                "2. Environment & Staging Geometry:\n" +
+                "   - Define pathType ('pedestal', 'studio_backdrop', 'spline_curve', 'terrain_path', 'architectural_interior', 'open_expanse').\n" +
+                "   - Set pathLengthMeters based on prompt scale (e.g. 5m for room/pedestal, 50m for street, 500m for long pursuit).\n" +
+                "   - Set terrainType ('studio', 'room_interior', 'outdoor_ground', 'nature_landscape', 'cyber_city', 'coastal_cliff').\n" +
                 "3. Timeline & Motion Dynamics:\n" +
-                "   - Define animation duration (e.g. 5.0s, 10.0s, 150-300 frames @ 30fps) allowing high-speed motion to unfold.\n" +
-                "   - Define camera tracking style (e.g. ground-level chase at 0.15m height alongside rear wheel, drone overhead, 3/4 chase).\n" +
+                "   - Define animation duration in seconds and frame count based on prompt intent (e.g. 2.0s = 48-60 frames for turntable, 5.0s = 120-150 frames for cinematic action).\n" +
+                "   - Define camera tracking style ('turntable_orbit', 'action_follow', 'cinematic_dolly', 'stationary_pan', 'drone_overhead').\n" +
                 "4. Optics & Shading:\n" +
-                "   - Conforming to Blender 4.2+ Principled BSDF socket names and AgX color science.\n\n" +
+                "   - Conforming to Blender 4.2+ Principled BSDF socket names ('Base Color' RGBA, 'Metallic', 'Roughness') and AgX color science.\n\n" +
                 "OUTPUT RAW STRICT JSON ONLY (NO MARKDOWN FENCES):\n" +
                 "{\n" +
                 "  \"sceneType\": \"string\",\n" +
                 "  \"mood\": \"string\",\n" +
                 "  \"visualStyleNotes\": \"string\",\n" +
-                "  \"subjectCategory\": \"supercar | aircraft | marine | humanoid | architecture | prop\",\n" +
-                "  \"targetSubjectLengthMeters\": 4.5,\n" +
-                "  \"pathType\": \"spline_curve | hairpin_mountain | coastal_track | airport_runway | pedestal\",\n" +
-                "  \"pathLengthMeters\": 1000.0,\n" +
-                "  \"pathWidthMeters\": 14.0,\n" +
-                "  \"terrainType\": \"coastal_cliff | mountain_pass | desert | cyber_city | studio\",\n" +
-                "  \"terrainElevationMeters\": 25.0,\n" +
-                "  \"animationDurationSeconds\": 5.0,\n" +
-                "  \"totalFrames\": 150,\n" +
-                "  \"fps\": 30,\n" +
-                "  \"cameraTrackingStyle\": \"ground_level_chase | drone_overhead | orbit | flyby\",\n" +
-                "  \"cameraHeightMeters\": 0.20,\n" +
-                "  \"cameraDistanceMeters\": 6.5,\n" +
+                "  \"subjectCategory\": \"humanoid | creature | prop | product | architecture | vehicle | aircraft\",\n" +
+                "  \"targetSubjectLengthMeters\": 1.8,\n" +
+                "  \"pathType\": \"pedestal | studio_backdrop | spline_curve | terrain_path | architectural_interior\",\n" +
+                "  \"pathLengthMeters\": 10.0,\n" +
+                "  \"pathWidthMeters\": 5.0,\n" +
+                "  \"terrainType\": \"studio | room_interior | outdoor_ground | nature_landscape | cyber_city\",\n" +
+                "  \"terrainElevationMeters\": 0.0,\n" +
+                "  \"animationDurationSeconds\": 3.0,\n" +
+                "  \"totalFrames\": 72,\n" +
+                "  \"fps\": 24,\n" +
+                "  \"cameraTrackingStyle\": \"turntable_orbit | action_follow | cinematic_dolly | stationary_pan | drone_overhead\",\n" +
+                "  \"cameraHeightMeters\": 1.2,\n" +
+                "  \"cameraDistanceMeters\": 4.0,\n" +
                 "  \"workers\": {\n" +
                 "    \"w1_structure\": \"string description for Worker 1\",\n" +
                 "    \"w2_details\": \"string description for Worker 2\",\n" +
@@ -252,24 +251,24 @@ public class DirectorAgent {
                 "    \"w4_cinematics\": \"string description for Worker 4\"\n" +
                 "  },\n" +
                 "  \"camera\": {\n" +
-                "    \"focalLengthMm\": 35.0,\n" +
+                "    \"focalLengthMm\": 50.0,\n" +
                 "    \"apertureFStop\": 2.8,\n" +
-                "    \"focusDistance\": 5.0,\n" +
-                "    \"position\": [-3.8, -7.0, 2.0],\n" +
+                "    \"focusDistance\": 4.0,\n" +
+                "    \"position\": [0.0, -4.0, 1.5],\n" +
                 "    \"target\": [0.0, 0.0, 0.8]\n" +
                 "  },\n" +
                 "  \"lighting\": {\n" +
-                "    \"useVolumetrics\": true,\n" +
-                "    \"volumetricDensity\": 0.015,\n" +
-                "    \"sunElevation\": 18.0,\n" +
-                "    \"sunAzimuth\": 45.0,\n" +
-                "    \"sunIntensity\": 6.0,\n" +
-                "    \"ambientColorHex\": \"#202835\"\n" +
+                "    \"useVolumetrics\": false,\n" +
+                "    \"volumetricDensity\": 0.01,\n" +
+                "    \"sunElevation\": 45.0,\n" +
+                "    \"sunAzimuth\": 30.0,\n" +
+                "    \"sunIntensity\": 4.5,\n" +
+                "    \"ambientColorHex\": \"#303030\"\n" +
                 "  },\n" +
                 "  \"palette\": {\n" +
-                "    \"primaryColorHex\": \"#D4AF37\",\n" +
-                "    \"secondaryColorHex\": \"#222222\",\n" +
-                "    \"accentColorHex\": \"#E74C3C\"\n" +
+                "    \"primaryColorHex\": \"#FFFFFF\",\n" +
+                "    \"secondaryColorHex\": \"#333333\",\n" +
+                "    \"accentColorHex\": \"#00E5FF\"\n" +
                 "  },\n" +
                 "  \"seeds\": {\n" +
                 "    \"seedTerrain\": 101,\n" +
@@ -298,42 +297,41 @@ public class DirectorAgent {
               .append(", Secondary=").append(spec.getSecondaryColorHex()).append("\n");
         }
 
-        float pathLen = (spec != null) ? spec.getPathLengthMeters() : 1000.0f;
-        int totalFrames = (spec != null) ? spec.getTotalFrames() : 150;
-        float subSize = (spec != null) ? spec.getTargetSubjectLengthMeters() : 4.5f;
+        int totalFrames = (spec != null) ? spec.getTotalFrames() : 72;
+        float subSize = (spec != null) ? spec.getTargetSubjectLengthMeters() : 1.8f;
+        String trackingStyle = (spec != null && spec.getCameraTrackingStyle() != null) ? spec.getCameraTrackingStyle() : "turntable_orbit";
 
         switch (workerIndex) {
-            case 1: // Worker 1: Core Structure, Real-World Sizing & Custom Path/Road
-                sb.append("\nTASK: WORKER 1 (STRUCTURE, CONTEXTUAL SCALE & PATH GEOMETRY)\n")
+            case 1: // Worker 1: Core Structure, Real-World Sizing & Environment Staging
+                sb.append("\nTASK: WORKER 1 (STRUCTURE, CONTEXTUAL SCALE & ENVIRONMENT STAGING)\n")
                   .append("- If an imported 3D model exists in 'inputs/', import it using `bpy.ops.import_scene.gltf(filepath='inputs/input_model.glb')` (or 'input_model.glb').\n")
-                  .append("- NORMALIZE SIZE: Compute combined bounding box across all imported sub-meshes. Scale assembly so total length is exactly ")
+                  .append("- NORMALIZE SIZE: Compute combined bounding box across all imported sub-meshes. Scale assembly so its primary dimension matches the target size of ")
                   .append(subSize).append(" meters. Bake transforms using `bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)`.\n")
-                  .append("- ENVIRONMENT GEOMETRY: Build dynamic road/runway/path matching the prompt. If curves/hairpins or sweeping expressways are requested, generate a Blender Bézier curve spline (`bpy.data.curves.new`) extruded to ")
-                  .append(pathLen).append(" meters with thickness to prevent Z-fighting.\n")
+                  .append("- ENVIRONMENT GEOMETRY: Build staging geometry (pedestal, ground plane, room, or terrain) matching the prompt. Ensure contact base sits flush at Z = 0.0.\n")
                   .append("- Output raw Blender Python code inside ```python.");
                 break;
             case 2: // Worker 2: Placement, Master Root Parenting & Kinetic Animation
                 sb.append("\nTASK: WORKER 2 (PLACEMENT, PARENTING & DYNAMIC ANIMATION)\n")
-                  .append("- PLACEMENT: Snap bottom-most contact point of asset flush to surface at Z=0.0, centered in lane.\n")
-                  .append("- PARENTING: Create master Empty object 'Model_Root' at (0, 0, 0) with clean (1,1,1) scale. Parent all asset sub-meshes keeping relative assembly intact.\n")
-                  .append("- ANIMATION: Animate 'Model_Root' moving forward from frame 1 to frame ").append(totalFrames)
-                  .append(" along the custom path distance with linear/eased interpolation.\n")
-                  .append("- SUB-PART KINEMATICS: If wheels, propellers, or rotors exist, bake rotational keyframes per frame to prevent quaternion interpolation jitter.\n")
+                  .append("- PLACEMENT: Snap bottom-most contact point of asset flush to surface at Z=0.0.\n")
+                  .append("- PARENTING: Create master Empty object 'Model_Root' at (0, 0, 0). Parent all asset sub-meshes keeping relative offsets intact.\n")
+                  .append("- ANIMATION: Keyframe animation from frame 1 to frame ").append(totalFrames)
+                  .append(" matching the prompt intent (e.g. 360 rotation for turntables, forward translation for moving subjects, or bone keyframes for rigs).\n")
                   .append("- Output raw Blender Python code inside ```python.");
                 break;
             case 3: // Worker 3: PBR Materials & Shaders
                 sb.append("\nTASK: WORKER 3 (PBR MATERIALS & SHADERS)\n")
-                  .append("- Configure Principled BSDF materials using Blender 4.2+ socket names ('Transmission Weight', 'Roughness', 'Metallic', 'Base Color').\n")
-                  .append("- Create high-detail micro-textures on asphalt, pavement, paint, metals, glass, or organic surfaces.\n")
+                  .append("- Configure Principled BSDF materials using Blender 4.2+ socket names: 'Base Color' (4-element RGBA tuple: r, g, b, 1.0), 'Metallic', 'Roughness'.\n")
+                  .append("- Apply authentic PBR materials to environment and prop surfaces matching the requested visual style.\n")
                   .append("- Output raw Blender Python code inside ```python.");
                 break;
             case 4: // Worker 4: Cinematics, Camera Optics, Motion Blur & Lighting
             default:
                 sb.append("\nTASK: WORKER 4 (CINEMATICS, CAMERA TRACKING & LIGHTING)\n")
-                  .append("- CAMERA SETUP: Position camera in world coordinates matching prompt style (e.g. low-angle chase, drone overhead) with a `TRACK_TO` constraint targeting 'Model_Root'.\n")
-                  .append("- Animate camera moving alongside the subject from frame 1 to frame ").append(totalFrames).append(".\n")
-                  .append("- Configure lens (35mm / 20mm anamorphic), Depth of Field (f/2.8), and optical motion blur (`scene.render.use_motion_blur = True`).\n")
-                  .append("- LIGHTING: Enable World background nodes with ambient sky radiance (`bpy.context.scene.world.use_nodes = True`) and add high-energy Sun light (energy >= 5.5).\n")
+                  .append("- CAMERA SETUP: Position camera to showcase the subject using tracking style '").append(trackingStyle)
+                  .append("'. Add a `TRACK_TO` constraint targeting 'Model_Root' if tracking or orbiting.\n")
+                  .append("- Animate camera from frame 1 to frame ").append(totalFrames).append(".\n")
+                  .append("- Configure lens, Depth of Field, and motion blur (`scene.render.use_motion_blur = True`, `scene.render.motion_blur_shutter = 0.5`).\n")
+                  .append("- LIGHTING: Enable World background nodes and position key lights to illuminate the subject with professional 3-point or ambient studio lighting.\n")
                   .append("- Output raw Blender Python code inside ```python.");
                 break;
         }
