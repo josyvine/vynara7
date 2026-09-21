@@ -227,6 +227,11 @@ public class SettingsFragment extends Fragment {
                     if (etGithubPat != null && keyMgr.hasGitHubConfig()) {
                         etGithubPat.setText(keyMgr.getMaskedGitHubPat());
                     }
+
+                    // Auto-sync Gemini API key to GitHub Secrets if key is present
+                    if (keyMgr.hasApiKey() && !repo.isEmpty() && !pat.isEmpty()) {
+                        syncApiKeyToGitHub(repo, pat, keyMgr.getApiKey());
+                    }
                 });
             }
 
@@ -321,6 +326,11 @@ public class SettingsFragment extends Fragment {
                     etApiKey.setText(keyMgr.getMaskedApiKey());
                     if (!key.isEmpty()) {
                         fetchLiveModels(key, modelList, modelAdapter, keyMgr, true);
+
+                        // Upload to GitHub Secrets so Blender can connect in cloud
+                        if (keyMgr.hasGitHubConfig()) {
+                            syncApiKeyToGitHub(keyMgr.getGitHubRepo(), keyMgr.getGitHubPat(), key);
+                        }
                     }
                 }
             });
@@ -384,6 +394,30 @@ public class SettingsFragment extends Fragment {
                 }
             });
         }
+    }
+
+    private void syncApiKeyToGitHub(String repo, String pat, String apiKey) {
+        if (repo == null || repo.trim().isEmpty() || pat == null || pat.trim().isEmpty() || apiKey == null || apiKey.trim().isEmpty()) {
+            return;
+        }
+        if (getContext() != null) {
+            Toast.makeText(getContext(), "Syncing GEMINI_API_KEY to GitHub Actions Secret...", Toast.LENGTH_SHORT).show();
+        }
+        oAuthService.uploadSecretToRepo(pat, repo, "GEMINI_API_KEY", apiKey, new GitHubOAuthService.SecretCallback() {
+            @Override
+            public void onSuccess() {
+                if (getContext() != null) {
+                    Toast.makeText(getContext(), "GEMINI_API_KEY synced to GitHub Secret successfully!", Toast.LENGTH_SHORT).show();
+                }
+            }
+
+            @Override
+            public void onError(String errorMessage) {
+                if (getContext() != null) {
+                    Toast.makeText(getContext(), "GitHub Secret sync notice: " + errorMessage, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
     }
 
     public void updateGitHubAuthUI(ApiKeyManager keyMgr) {
