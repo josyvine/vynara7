@@ -123,6 +123,11 @@ dependencies {
   implementation(libs.okhttp)
   // implementation(libs.play.services.location)
   implementation(libs.retrofit)
+
+  // Libsodium sealed box encryption for GitHub Actions Secrets API
+  implementation("com.goterl:lazysodium-android:5.1.0@aar")
+  implementation("net.java.dev.jna:jna:5.13.0@aar")
+
   testImplementation(libs.androidx.compose.ui.test.junit4)
   testImplementation(libs.androidx.core)
   testImplementation(libs.androidx.junit)
