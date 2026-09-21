@@ -807,7 +807,7 @@ public class GitHubWorkflowBridge {
     }
 
     /**
-     * Polling method with explicit excludedRunId to prevent the Attempt 2 race condition.
+     * Polling method with smart active-run detection and safe time buffer.
      */
     public void awaitWorkflowAndDownloadArtifact(String repository,
                                                 String personalAccessToken,
@@ -895,14 +895,21 @@ public class GitHubWorkflowBridge {
                                     } catch (Exception ignored) {}
 
                                     String status = r.optString("status", "unknown");
+                                    boolean isLive = "queued".equalsIgnoreCase(status) || "in_progress".equalsIgnoreCase(status);
 
-                                    // Ignore runs that completed prior to this dispatch
-                                    if ("completed".equalsIgnoreCase(status) && runCreatedAtMs < dispatchTimeMs) {
+                                    // 1. Any active/in-progress run not excluded is immediately matched
+                                    if (isLive) {
+                                        targetRun = r;
+                                        break;
+                                    }
+
+                                    // 2. Ignore completed runs from past sessions (safe 45s buffer)
+                                    if ("completed".equalsIgnoreCase(status) && runCreatedAtMs < (dispatchTimeMs - 45000)) {
                                         continue;
                                     }
 
-                                    // Strictly match runs dispatched for this session
-                                    if (runCreatedAtMs >= (dispatchTimeMs - 1000)) {
+                                    // 3. Match completed runs associated with this dispatch session
+                                    if (runCreatedAtMs >= (dispatchTimeMs - 45000)) {
                                         targetRun = r;
                                         break;
                                     }
