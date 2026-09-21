@@ -222,8 +222,9 @@ jobs:
           bpy_script = bpy_script.replace("bpy.ops.camera.add(", "bpy.ops.object.camera_add(")
           bpy_script = bpy_script.replace("bpy.ops.object.mesh.", "bpy.ops.mesh.")
 
-          # Auto-Repair 5: Fix hallucinated update_from_data
+          # Auto-Repair 5: Fix hallucinated update_from_data and node_nodes
           bpy_script = bpy_script.replace(".update_from_data()", ".data.update()")
+          bpy_script = bpy_script.replace(".node_nodes", ".use_nodes")
 
           # Auto-Repair 6: Blender 4.2+ Principled BSDF socket name updates
           bpy_script = bpy_script.replace("['Transmission'].default_value", "['Transmission Weight'].default_value")
@@ -236,10 +237,10 @@ jobs:
           bpy_script = bpy_script.replace("'BLENDER_EEVEE_NEXT'", "'CYCLES'")
           bpy_script = bpy_script.replace('"BLENDER_EEVEE_NEXT"', '"CYCLES"')
 
-          # Auto-Repair 7: Fix ShaderNodeMix / Color socket dimension mismatch (RGBA 4-tuple on 3-tuple socket)
+          # Auto-Repair 7: Ensure Base Color is ALWAYS a 4-tuple (RGBA) with alpha
           bpy_script = re.sub(
-              r"(\.inputs\[(?:\d+|['\"][^'\"]+['\"])\]\.default_value\s*=\s*\(\s*[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?\s*,\s*[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?\s*,\s*[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)\s*,\s*[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?\s*\)",
-              r"\1)",
+              r"(inputs\s*\[\s*['\"]Base Color['\"]\s*\]\.default_value\s*=\s*\(\s*[-+]?[0-9]*\.?[0-9]+\s*,\s*[-+]?[0-9]*\.?[0-9]+\s*,\s*[-+]?[0-9]*\.?[0-9]+\s*)\)",
+              r"\1, 1.0)",
               bpy_script
           )
 
