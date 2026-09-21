@@ -91,8 +91,8 @@ public class CreateFragment extends Fragment {
                             selectedScriptFileName = "custom_script.py";
                         }
 
-                        // CRITICAL FIX: Attaching a custom procedural script disassociates any previously selected 3D model
-                        // This prevents residual cars from being uploaded with standalone procedural scripts (e.g. skyscrapers)
+                        // Attaching a custom procedural script disassociates any previously selected 3D model
+                        // This prevents residual models from being uploaded with standalone procedural scripts
                         currentActiveAsset = null;
                         if (runtime != null) {
                             runtime.setActiveSelectedAsset(null);
@@ -230,7 +230,7 @@ public class CreateFragment extends Fragment {
             });
         }
 
-        // 5 Demo Presets
+        // 5 Universal Demo Presets
         setupPresetButton(view, R.id.preset_house, "Create a realistic modern villa with a swimming pool, wooden deck, interior lighting, furniture, and surrounding palm trees.");
         setupPresetButton(view, R.id.preset_human, "Create a stylized rigged superhero character with suit details, heroic posture, and skeletal animation tracks.");
         setupPresetButton(view, R.id.preset_dog, "Create an animated quadruped dog model with skeletal rig, fur material, and a running cycle animation.");
@@ -240,25 +240,24 @@ public class CreateFragment extends Fragment {
         // Check and sync any active asset selected in AssetsFragment or Studio
         syncActiveAssetFromRuntime();
 
-        // Generate button with Strict Pre-Flight Validation (ZERO Silent Fallback)
+        // Generate button with Strict Pre-Flight Validation
         Button btnGenerate = view.findViewById(R.id.btn_create_generate);
         if (btnGenerate != null) {
             btnGenerate.setOnClickListener(v -> {
-                // If a script is attached, do NOT restore old cached assets from runtime
                 if (selectedScriptUri == null && currentActiveAsset == null && runtime != null) {
                     currentActiveAsset = runtime.getActiveSelectedAsset();
                 }
 
                 String prompt = etPrompt.getText().toString().trim();
 
-                // If a custom script is attached, it takes total precedence over residual models
+                // Clean universal prompt fallback handling
                 if (selectedScriptUri != null) {
                     if (prompt.isEmpty()) {
                         prompt = "Custom Script: " + (selectedScriptFileName != null ? selectedScriptFileName : "custom_model.py");
                     }
                 } else if (currentActiveAsset != null) {
                     if (prompt.isEmpty()) {
-                        prompt = "Cinematic high-speed driving shot of " + currentActiveAsset.getName() + " tearing down a highway next to a guardrail with low-angle wheel camera and motion blur.";
+                        prompt = "Cinematic showcase of " + currentActiveAsset.getName() + " with dynamic lighting, professional camera movement, and environment staging.";
                     }
                 } else {
                     if (prompt.isEmpty()) {
@@ -277,7 +276,7 @@ public class CreateFragment extends Fragment {
 
                 VynaraLogger.system("CreateFragment: User tapped Generate -> Pipeline: " + selectedPipelineMode.getDisplayName());
 
-                // Perform strict pre-flight execution contract validation
+                // Strict pre-flight execution contract validation
                 boolean hasPrompt = !prompt.isEmpty();
                 boolean hasScript = (selectedScriptUri != null || currentActiveAsset != null);
                 int refImgCount = selectedImageUris.size();
@@ -293,19 +292,18 @@ public class CreateFragment extends Fragment {
                 if (!contractStatus.isValid()) {
                     VynaraLogger.validation(VynaraLogger.LogLevel.ERROR, "CreateFragment: Pre-flight check FAILED: " + contractStatus.getErrorMessage());
                     Toast.makeText(getContext(), contractStatus.getErrorMessage(), Toast.LENGTH_LONG).show();
-                    return; // STRICT HALT: Stops execution immediately to prevent silent fallback!
+                    return;
                 }
 
                 List<String> refUrisStrList = new ArrayList<>();
 
-                // If custom script is attached, cache it locally and append FIRST (exclusive of model fallback)
+                // If custom script is attached, cache it locally and append FIRST
                 if (selectedScriptUri != null) {
                     String cachedScriptPath = cacheCustomScript(requireContext(), selectedScriptUri);
                     if (cachedScriptPath != null) {
                         refUrisStrList.add(cachedScriptPath);
                     }
                 } else if (currentActiveAsset != null && currentActiveAsset.getFilePath() != null) {
-                    // Only bind active imported model if no custom script is attached
                     File assetFile = new File(currentActiveAsset.getFilePath());
                     if (assetFile.exists() && assetFile.length() > 0) {
                         refUrisStrList.add("model:" + currentActiveAsset.getFilePath());
@@ -357,14 +355,7 @@ public class CreateFragment extends Fragment {
             updateReferenceUI();
 
             String name = active.getName();
-            etPrompt.setHint("Direct action for " + name + " (e.g. 'High speed driving, low rear wheel angle, motion blur')...");
-
-            // Auto-configure appropriate style for vehicles
-            if (active.getCategory() != null && active.getCategory().toUpperCase(Locale.US).contains("VEHICLE")) {
-                if (spinnerStyle != null && spinnerStyle.getCount() > 0) {
-                    spinnerStyle.setSelection(0); // Photorealistic
-                }
-            }
+            etPrompt.setHint("Direct action for " + name + " (e.g. 'Cinematic turntable orbit, dramatic rim lighting, walking animation')...");
 
             VynaraLogger.system("CreateFragment: Synchronized active asset: " + active.getName() + " (" + active.getFormat() + ")");
             Toast.makeText(getContext(), "Ready to animate: " + active.getName(), Toast.LENGTH_SHORT).show();
@@ -409,7 +400,7 @@ public class CreateFragment extends Fragment {
             if (selectedScriptFileName != null) {
                 sb.append("📜 ").append(selectedScriptFileName).append(" (Attached) ");
             } else if (currentActiveAsset != null) {
-                sb.append("🏎️ Model: ").append(currentActiveAsset.getName())
+                sb.append("📦 Model: ").append(currentActiveAsset.getName())
                   .append(" (").append(currentActiveAsset.getFormat()).append(") ");
             }
 
@@ -456,7 +447,6 @@ public class CreateFragment extends Fragment {
         adapterTarget.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         spinnerTarget.setAdapter(adapterTarget);
 
-        // Populate directly from the 4 AIPipelineMode enum constants
         AIPipelineMode[] modes = AIPipelineMode.values();
         String[] modeDisplayNames = new String[modes.length];
         for (int i = 0; i < modes.length; i++) {
