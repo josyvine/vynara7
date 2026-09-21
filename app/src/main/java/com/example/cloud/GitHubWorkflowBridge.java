@@ -156,7 +156,7 @@ public class GitHubWorkflowBridge {
     }
 
     /**
-     * Context-aware dispatch with full Architecture B parameter forwarding (user prompt, model choice, API key).
+     * Context-aware dispatch with full Architecture B parameter forwarding (user prompt, model choice).
      */
     public void dispatchGenerationWorkflowWithModel(Context context,
                                                     String repository,
@@ -170,17 +170,15 @@ public class GitHubWorkflowBridge {
                                                     WorkflowDispatchCallback callback) {
         String token = GitHubOAuthService.getAccessToken(context);
         String selectedModel = null;
-        String geminiApiKey = null;
         try {
             if (context != null) {
                 ApiKeyManager keyMgr = new ApiKeyManager(context);
                 selectedModel = keyMgr.getSelectedModel();
-                geminiApiKey = keyMgr.getApiKey();
             }
         } catch (Throwable ignored) {}
 
         dispatchGenerationWorkflowWithModel(repository, token, eventType, assetId, bpyScript, inputModelFile,
-                isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+                isRawScript, pipelineMode, userPrompt, selectedModel, null, callback);
     }
 
     public void dispatchCustomScriptWorkflow(Context context,
@@ -333,6 +331,9 @@ public class GitHubWorkflowBridge {
 
         boolean isRaw = isRawScript || (bpyScript != null && (bpyScript.contains("is_raw_script=True") || bpyScript.startsWith("# VYNARA_PIPELINE: OPTION_A")));
         String effectivePipelineMode = (pipelineMode != null && !pipelineMode.isEmpty()) ? pipelineMode : (isRaw ? "OPTION_A" : "PROCEDURAL_PYTHON");
+        if ("pipeline_opt_a_procedural".equalsIgnoreCase(effectivePipelineMode)) {
+            effectivePipelineMode = "OPTION_A";
+        }
 
         if (!isRaw && (inputModelFile == null || !inputModelFile.exists())) {
             try {
@@ -350,9 +351,9 @@ public class GitHubWorkflowBridge {
         }
 
         if (inputModelFile != null && inputModelFile.exists() && inputModelFile.length() > 0 && !isRaw) {
-            uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRaw, effectivePipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+            uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRaw, effectivePipelineMode, userPrompt, selectedModel, callback);
         } else {
-            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, isRaw, effectivePipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, isRaw, effectivePipelineMode, userPrompt, selectedModel, callback);
         }
     }
 
@@ -366,7 +367,6 @@ public class GitHubWorkflowBridge {
                                         String pipelineMode,
                                         String userPrompt,
                                         String selectedModel,
-                                        String geminiApiKey,
                                         WorkflowDispatchCallback callback) {
         String ext = ".glb";
         String origName = modelFile.getName().toLowerCase(Locale.US);
@@ -390,7 +390,7 @@ public class GitHubWorkflowBridge {
         httpClient.newCall(getShaReq).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+                performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, isRawScript, pipelineMode, userPrompt, selectedModel, callback);
             }
 
             @Override
@@ -411,10 +411,10 @@ public class GitHubWorkflowBridge {
                         && existingSha.equalsIgnoreCase(localGitBlobSha) 
                         && remoteSize == modelFile.length()) {
                     VynaraLogger.system("GitHubWorkflowBridge: 3D model already synced in repository (" + modelFile.length() + " bytes). Bypassing redundant upload.");
-                    executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+                    executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, userPrompt, selectedModel, callback);
                 } else {
                     VynaraLogger.system("GitHubWorkflowBridge: Uploading 3D asset (" + modelFile.length() + " bytes) to repository: " + targetPath);
-                    performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, existingSha, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+                    performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, existingSha, isRawScript, pipelineMode, userPrompt, selectedModel, callback);
                 }
             }
         });
@@ -432,7 +432,6 @@ public class GitHubWorkflowBridge {
                                  String pipelineMode,
                                  String userPrompt,
                                  String selectedModel,
-                                 String geminiApiKey,
                                  WorkflowDispatchCallback callback) {
         try {
             byte[] fileBytes = new byte[(int) modelFile.length()];
@@ -474,7 +473,7 @@ public class GitHubWorkflowBridge {
                     try {
                         if (response.isSuccessful() || response.code() == 200 || response.code() == 201) {
                             VynaraLogger.system("GitHubWorkflowBridge: Successfully uploaded 3D model (" + targetPath + ")");
-                            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+                            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, userPrompt, selectedModel, callback);
                         } else {
                             String err = "Model upload rejected by GitHub [HTTP " + response.code() + "]: " + response.message();
                             VynaraLogger.e("GitHubWorkflowBridge: " + err);
@@ -502,7 +501,6 @@ public class GitHubWorkflowBridge {
                                      String pipelineMode,
                                      String userPrompt,
                                      String selectedModel,
-                                     String geminiApiKey,
                                      WorkflowDispatchCallback callback) {
         String dispatchUrl = "https://api.github.com/repos/" + repository.trim() + "/dispatches";
 
@@ -536,7 +534,7 @@ public class GitHubWorkflowBridge {
                 clientPayload.put("pipeline_mode", pipelineMode);
             }
 
-            // Architecture B payload parameters
+            // Forward prompts and model choices without transmitting raw secrets over HTTP
             if (userPrompt != null && !userPrompt.trim().isEmpty()) {
                 clientPayload.put("user_prompt", userPrompt.trim());
                 clientPayload.put("prompt", userPrompt.trim());
@@ -544,10 +542,6 @@ public class GitHubWorkflowBridge {
 
             if (selectedModel != null && !selectedModel.trim().isEmpty()) {
                 clientPayload.put("selected_model", selectedModel.trim());
-            }
-
-            if (geminiApiKey != null && !geminiApiKey.trim().isEmpty()) {
-                clientPayload.put("gemini_api_key", geminiApiKey.trim());
             }
 
             clientPayload.put("timestamp", System.currentTimeMillis());
@@ -894,8 +888,10 @@ public class GitHubWorkflowBridge {
                                         }
                                     } catch (Exception ignored) {}
 
-                                    String status = r.optString("status", "unknown");
-                                    boolean isLive = "queued".equalsIgnoreCase(status) || "in_progress".equalsIgnoreCase(status);
+                                    String status = r.optString("status", "unknown").toLowerCase(Locale.US);
+                                    boolean isLive = "queued".equals(status) || "in_progress".equals(status)
+                                            || "waiting".equals(status) || "requested".equals(status)
+                                            || "pending".equals(status);
 
                                     // 1. Any active/in-progress run not excluded is immediately matched
                                     if (isLive) {
@@ -903,13 +899,13 @@ public class GitHubWorkflowBridge {
                                         break;
                                     }
 
-                                    // 2. Ignore completed runs from past sessions (safe 45s buffer)
-                                    if ("completed".equalsIgnoreCase(status) && runCreatedAtMs < (dispatchTimeMs - 45000)) {
+                                    // 2. Ignore completed runs from past sessions (safe 120s buffer)
+                                    if ("completed".equalsIgnoreCase(status) && runCreatedAtMs < (dispatchTimeMs - 120000)) {
                                         continue;
                                     }
 
                                     // 3. Match completed runs associated with this dispatch session
-                                    if (runCreatedAtMs >= (dispatchTimeMs - 45000)) {
+                                    if (runCreatedAtMs >= (dispatchTimeMs - 120000)) {
                                         targetRun = r;
                                         break;
                                     }
