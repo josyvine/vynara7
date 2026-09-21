@@ -3,6 +3,7 @@ package com.example.tools;
 import com.example.ai.ApiKeyManager;
 import com.example.ai.GeminiApiClient;
 import com.example.ai.protocol.AIPipelineMode;
+import com.example.asset.Asset;
 import com.example.asset.AssetManager;
 import com.example.character.Character;
 import com.example.character.CharacterManager;
@@ -349,7 +350,6 @@ public class ToolExecutor {
                             VynaraLogger.system("neural.image_to_3d: Importing synthesized 3D mesh into active scene viewport...");
                             GLTFImporter.ImportResult result = GLTFImporter.loadFromFile(downloadedGlbFile);
                             
-                            // Reset canvas to eliminate residual stacked geometry
                             engine.getSceneManager().getActiveScene().getObjects().clear();
                             characterManager.getCharacterMap().clear();
                             engine.getSceneManager().selectObject(null);
@@ -408,7 +408,6 @@ public class ToolExecutor {
                         || "true".equalsIgnoreCase(op.getStringParam("isRawUserScript", "false"))
                         || (activeMode == AIPipelineMode.PROCEDURAL_PYTHON && !bpyScript.isEmpty() && !bpyScript.contains("Model_Root"));
 
-                // Resolve GitHub dispatch event type deterministically based on tool ID & mode
                 String eventType = activeMode.getGithubEventType();
                 if ("blender.agentic_autonomous".equals(id)) {
                     eventType = "vynara_agentic_auto";
@@ -416,7 +415,6 @@ public class ToolExecutor {
                     eventType = "vynara_agentic_interactive";
                 }
 
-                // If standalone raw procedural script, prepend metadata tag so worker skips car/highway logic
                 if (isRawScript && !bpyScript.startsWith("# VYNARA_PIPELINE:")) {
                     bpyScript = "# VYNARA_PIPELINE: OPTION_A (is_raw_script=True)\n" + bpyScript;
                 }
@@ -453,10 +451,28 @@ public class ToolExecutor {
                     modelsDir.mkdirs();
                 }
 
+                // Resolve input model if attached to scene/runtime
+                File inputModelFile = null;
+                if (!isRawScript) {
+                    try {
+                        ProjectRuntime runtime = ProjectRuntime.getInstance();
+                        if (runtime != null) {
+                            Asset activeAsset = runtime.getActiveSelectedAsset();
+                            if (activeAsset != null && activeAsset.getFilePath() != null) {
+                                File candidateFile = new File(activeAsset.getFilePath());
+                                if (candidateFile.exists() && candidateFile.length() > 0) {
+                                    inputModelFile = candidateFile;
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {}
+                }
+
                 int maxAiAttempts = activeMode.isAgentic() ? 1 : 2;
                 String currentBpyScript = bpyScript;
                 String currentAssetId = assetId;
                 boolean finalSuccess = false;
+                final long[] lastFailedRunId = new long[]{-1};
 
                 for (int attempt = 1; attempt <= maxAiAttempts; attempt++) {
                     final int currentAttempt = attempt;
@@ -477,7 +493,6 @@ public class ToolExecutor {
                             @Override
                             public void onSuccess(File downloadedGlbFile) {
                                 try {
-                                    // Reset active scene to prevent previous geometry stacking
                                     engine.getSceneManager().getActiveScene().getObjects().clear();
                                     characterManager.getCharacterMap().clear();
                                     engine.getSceneManager().selectObject(null);
@@ -516,13 +531,36 @@ public class ToolExecutor {
                         final String dispatchAssetId = currentAssetId;
                         final String dispatchScript = currentBpyScript;
                         final String finalEventType = eventType;
+                        final File finalInputModel = inputModelFile;
+                        final boolean finalIsRaw = isRawScript;
+                        final String finalPrompt = prompt;
+                        final String selectedModel = keyManager.getSelectedModel();
+                        final String geminiKey = keyManager.getApiKey();
 
-                        ghBridge.dispatchGenerationWorkflow(targetRepo, targetPat, finalEventType, dispatchAssetId, dispatchScript, new GitHubWorkflowBridge.WorkflowDispatchCallback() {
+                        ghBridge.dispatchGenerationWorkflowWithModel(
+                                targetRepo,
+                                targetPat,
+                                finalEventType,
+                                dispatchAssetId,
+                                dispatchScript,
+                                finalInputModel,
+                                finalIsRaw,
+                                activeMode.getId(),
+                                finalPrompt,
+                                selectedModel,
+                                geminiKey,
+                                new GitHubWorkflowBridge.WorkflowDispatchCallback() {
                             @Override
                             public void onDispatched(String eType, String aId) {
                                 VynaraLogger.system("Workflow [" + finalEventType + "] dispatched successfully. Awaiting worker artifacts...");
                                 
-                                ghBridge.awaitWorkflowAndDownloadArtifact(targetRepo, targetPat, dispatchAssetId, outputGlb, new GitHubWorkflowBridge.WorkflowPollingCallback() {
+                                ghBridge.awaitWorkflowAndDownloadArtifact(
+                                        targetRepo,
+                                        targetPat,
+                                        dispatchAssetId,
+                                        outputGlb,
+                                        lastFailedRunId[0],
+                                        new GitHubWorkflowBridge.WorkflowPollingCallback() {
                                     @Override
                                     public void onStatusUpdate(String status, String details) {
                                         VynaraLogger.system("GitHub Action: " + details);
@@ -538,7 +576,6 @@ public class ToolExecutor {
                                         try {
                                             VynaraLogger.system("Importing downloaded GLB into 3D scene engine...");
                                             
-                                            // Reset active scene to prevent residual roads/geometry stacking
                                             engine.getSceneManager().getActiveScene().getObjects().clear();
                                             characterManager.getCharacterMap().clear();
                                             engine.getSceneManager().selectObject(null);
@@ -570,6 +607,13 @@ public class ToolExecutor {
                                     }
 
                                     @Override
+                                    public void onScriptExecutionFailed(long runId, String errorTraceback) {
+                                        lastFailedRunId[0] = runId;
+                                        failureMessageHolder.append(errorTraceback);
+                                        latch.countDown();
+                                    }
+
+                                    @Override
                                     public void onError(String errorMessage) {
                                         VynaraLogger.e("GitHub Actions workflow pipeline error: " + errorMessage);
                                         failureMessageHolder.append(errorMessage);
@@ -597,7 +641,7 @@ public class ToolExecutor {
                         break;
                     }
 
-                    // Self-correction loop only applies to single-pass procedural runs
+                    // Secondary fallback repair loop for raw script or offline pipelines
                     String failureReason = failureMessageHolder.toString();
                     if (attempt < maxAiAttempts && keyManager.hasApiKey() && !failureReason.isEmpty() && activeMode.isProcedural()) {
                         VynaraLogger.system("ToolExecutor: Intercepted Blender runtime failure [" + failureReason + "]. Engaging AI Self-Correction Loop...");
@@ -609,13 +653,16 @@ public class ToolExecutor {
                                 "A generated Blender script failed during headless execution on the cloud worker.\n" +
                                 "Analyze the original user prompt, the failed script, and the exact Blender terminal error message.\n" +
                                 "Fix the syntax/API/operator/enum error and return ONLY the complete corrected Python script inside a single ```python block.\n" +
-                                "RULES:\n" +
+                                "CRITICAL BLENDER 4.2 API RULES:\n" +
                                 "1. Output ONLY executable Python code inside ```python. No commentary.\n" +
-                                "2. Ensure all mesh operators use `bpy.ops.mesh.primitive_...` (never `_create` or `bpy.ops.object.mesh.`).\n" +
-                                "3. Ensure all lighting operators use `bpy.ops.object.light_add` (never `bpy.ops.light.add`).\n" +
-                                "4. In `bpy.data.textures.new(name, type=...)`, type MUST be one of ('NONE', 'BLEND', 'CLOUDS', 'DISTORTED_NOISE', 'IMAGE', 'MAGIC', 'MARBLE', 'MUSGRAVE', 'NOISE', 'STUCCI', 'VORONOI', 'WOOD'). Never invent unlisted types.\n" +
-                                "5. Preserve all original multi-part 3D geometry and materials.\n" +
-                                "6. If this is a standalone procedural script (Option A), DO NOT inject car roads, driving animations, or lane markings.";
+                                "2. Principled BSDF 'Base Color' input requires a 4-element RGBA tuple: (r, g, b, 1.0). NEVER pass a 3-element tuple.\n" +
+                                "3. Motion blur shutter is located at `scene.render.motion_blur_shutter` with `scene.render.use_motion_blur = True` (never `scene.camera_motion_blur_shutter`).\n" +
+                                "4. Object transformation matrices are `obj.matrix_world` or `obj.matrix_basis` (never `obj.matrix_data`).\n" +
+                                "5. Ensure all mesh operators use `bpy.ops.mesh.primitive_...` (never `_create` or `bpy.ops.object.mesh.`).\n" +
+                                "6. Ensure all lighting operators use `bpy.ops.object.light_add` (never `bpy.ops.light.add`).\n" +
+                                "7. In `bpy.data.textures.new(name, type=...)`, type MUST be one of ('NONE', 'BLEND', 'CLOUDS', 'DISTORTED_NOISE', 'IMAGE', 'MAGIC', 'MARBLE', 'MUSGRAVE', 'NOISE', 'STUCCI', 'VORONOI', 'WOOD').\n" +
+                                "8. Set `scene.frame_start` and `scene.frame_end` dynamically based on requested animation duration. NEVER hardcode 60 frames.\n" +
+                                "9. If this is a standalone 3D model creation task, DO NOT inject car roads, driving animations, or lane markings.";
 
                         String repairPrompt = "USER PROMPT: " + prompt + "\n\n" +
                                 "EXACT BLENDER TERMINAL ERROR / TRACEBACK:\n" + failureReason + "\n\n" +
