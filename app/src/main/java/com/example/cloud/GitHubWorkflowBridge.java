@@ -5,6 +5,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Base64;
 
+import com.example.ai.ApiKeyManager;
 import com.example.asset.Asset;
 import com.example.runtime.ProjectRuntime;
 import com.example.utils.VynaraLogger;
@@ -64,15 +65,12 @@ public class GitHubWorkflowBridge {
         void onSuccess(File downloadedFile);
         void onError(String errorMessage);
 
-        // Solution B Hook: Invoked when Blender script execution failed and traceback was captured
         default void onScriptExecutionFailed(String errorTraceback) {
             onError("Blender Execution Error: " + errorTraceback);
         }
 
-        // Multimodal Visual Feedback Hook: Invoked when Cycles preview render is extracted
         default void onRenderPreviewReady(File renderPreviewFile) {}
 
-        // Cinematic Video Output Hook: Invoked when motion-blurred MP4 video is extracted
         default void onVideoReady(File videoFile) {}
     }
 
@@ -87,15 +85,12 @@ public class GitHubWorkflowBridge {
         void onSuccess(File downloadedFile);
         void onError(String errorMessage);
 
-        // Solution B Hook: Intercepts runner/Blender failures to drive AI self-correction without aborting the task graph
         default void onScriptExecutionFailed(long runId, String errorTraceback) {
             onError("Blender Execution Error: " + errorTraceback);
         }
 
-        // Multimodal Visual Feedback Hook: Invoked when Cycles preview render is extracted
         default void onRenderPreviewReady(File renderPreviewFile) {}
 
-        // Cinematic Video Output Hook: Invoked when motion-blurred MP4 video is extracted
         default void onVideoReady(File videoFile) {}
     }
 
@@ -132,7 +127,7 @@ public class GitHubWorkflowBridge {
         sLastRenderVideo = null;
     }
 
-    // --- Overloaded Context-Aware Methods (Auto-fetch Stored Token) ---
+    // --- Overloaded Context-Aware Methods (Auto-fetch Stored Token & Keys) ---
 
     public void testConnection(Context context, String repository, ConnectionTestCallback callback) {
         String token = GitHubOAuthService.getAccessToken(context);
@@ -149,9 +144,6 @@ public class GitHubWorkflowBridge {
         dispatchGenerationWorkflow(repository, token, eventType, assetId, bpyScript, callback);
     }
 
-    /**
-     * Dispatches generation workflow with optional input model payload.
-     */
     public void dispatchGenerationWorkflowWithModel(Context context,
                                                     String repository,
                                                     String eventType,
@@ -164,15 +156,40 @@ public class GitHubWorkflowBridge {
     }
 
     /**
-     * Directly dispatches custom uploaded .py scripts with prompt-free execution (Option A).
+     * Context-aware dispatch with full Architecture B parameter forwarding (user prompt, model choice, API key).
      */
+    public void dispatchGenerationWorkflowWithModel(Context context,
+                                                    String repository,
+                                                    String eventType,
+                                                    String assetId,
+                                                    String bpyScript,
+                                                    File inputModelFile,
+                                                    boolean isRawScript,
+                                                    String pipelineMode,
+                                                    String userPrompt,
+                                                    WorkflowDispatchCallback callback) {
+        String token = GitHubOAuthService.getAccessToken(context);
+        String selectedModel = null;
+        String geminiApiKey = null;
+        try {
+            ApiKeyManager keyMgr = ApiKeyManager.getInstance(context);
+            if (keyMgr != null) {
+                selectedModel = keyMgr.getSelectedModel();
+                geminiApiKey = keyMgr.getApiKey();
+            }
+        } catch (Throwable ignored) {}
+
+        dispatchGenerationWorkflowWithModel(repository, token, eventType, assetId, bpyScript, inputModelFile,
+                isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
+    }
+
     public void dispatchCustomScriptWorkflow(Context context,
                                              String repository,
                                              String assetId,
                                              String customScript,
                                              WorkflowDispatchCallback callback) {
         String token = GitHubOAuthService.getAccessToken(context);
-        dispatchGenerationWorkflowWithModel(repository, token, "vynara_generate", assetId, customScript, null, true, "OPTION_A", callback);
+        dispatchGenerationWorkflowWithModel(repository, token, "vynara_generate", assetId, customScript, null, true, "OPTION_A", null, null, null, callback);
     }
 
     public void dispatchModularGenerationWorkflow(Context context,
@@ -202,11 +219,20 @@ public class GitHubWorkflowBridge {
                                                 String assetId,
                                                 File destinationFile,
                                                 WorkflowPollingCallback callback) {
-        String token = GitHubOAuthService.getAccessToken(context);
-        awaitWorkflowAndDownloadArtifact(repository, token, assetId, destinationFile, callback);
+        awaitWorkflowAndDownloadArtifact(context, repository, assetId, destinationFile, -1, callback);
     }
 
-    // --- Standard Methods ---
+    public void awaitWorkflowAndDownloadArtifact(Context context,
+                                                String repository,
+                                                String assetId,
+                                                File destinationFile,
+                                                long excludedRunId,
+                                                WorkflowPollingCallback callback) {
+        String token = GitHubOAuthService.getAccessToken(context);
+        awaitWorkflowAndDownloadArtifact(repository, token, assetId, destinationFile, excludedRunId, callback);
+    }
+
+    // --- Standard Core Methods ---
 
     public void testConnection(String repository, String personalAccessToken, ConnectionTestCallback callback) {
         if (repository == null || repository.trim().isEmpty()) {
@@ -276,9 +302,6 @@ public class GitHubWorkflowBridge {
         dispatchGenerationWorkflowWithModel(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, false, null, callback);
     }
 
-    /**
-     * Overloaded method with explicit Option A / Raw Script isolation controls.
-     */
     public void dispatchGenerationWorkflowWithModel(String repository,
                                                     String personalAccessToken,
                                                     String eventType,
@@ -287,6 +310,21 @@ public class GitHubWorkflowBridge {
                                                     File inputModelFile,
                                                     boolean isRawScript,
                                                     String pipelineMode,
+                                                    WorkflowDispatchCallback callback) {
+        dispatchGenerationWorkflowWithModel(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRawScript, pipelineMode, null, null, null, callback);
+    }
+
+    public void dispatchGenerationWorkflowWithModel(String repository,
+                                                    String personalAccessToken,
+                                                    String eventType,
+                                                    String assetId,
+                                                    String bpyScript,
+                                                    File inputModelFile,
+                                                    boolean isRawScript,
+                                                    String pipelineMode,
+                                                    String userPrompt,
+                                                    String selectedModel,
+                                                    String geminiApiKey,
                                                     WorkflowDispatchCallback callback) {
         if (repository == null || repository.trim().isEmpty() || personalAccessToken == null || personalAccessToken.trim().isEmpty()) {
             callback.onError("GitHub credentials are not properly configured.");
@@ -312,9 +350,9 @@ public class GitHubWorkflowBridge {
         }
 
         if (inputModelFile != null && inputModelFile.exists() && inputModelFile.length() > 0 && !isRaw) {
-            uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRaw, effectivePipelineMode, callback);
+            uploadModelAndDispatch(repository, personalAccessToken, eventType, assetId, bpyScript, inputModelFile, isRaw, effectivePipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
         } else {
-            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, isRaw, effectivePipelineMode, callback);
+            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, null, isRaw, effectivePipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
         }
     }
 
@@ -326,6 +364,9 @@ public class GitHubWorkflowBridge {
                                         File modelFile,
                                         boolean isRawScript,
                                         String pipelineMode,
+                                        String userPrompt,
+                                        String selectedModel,
+                                        String geminiApiKey,
                                         WorkflowDispatchCallback callback) {
         String ext = ".glb";
         String origName = modelFile.getName().toLowerCase(Locale.US);
@@ -349,7 +390,7 @@ public class GitHubWorkflowBridge {
         httpClient.newCall(getShaReq).enqueue(new Callback() {
             @Override
             public void onFailure(Call call, IOException e) {
-                performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, isRawScript, pipelineMode, callback);
+                performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, null, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
             }
 
             @Override
@@ -370,10 +411,10 @@ public class GitHubWorkflowBridge {
                         && existingSha.equalsIgnoreCase(localGitBlobSha) 
                         && remoteSize == modelFile.length()) {
                     VynaraLogger.system("GitHubWorkflowBridge: 3D model already synced in repository (" + modelFile.length() + " bytes). Bypassing redundant upload.");
-                    executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, callback);
+                    executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
                 } else {
                     VynaraLogger.system("GitHubWorkflowBridge: Uploading 3D asset (" + modelFile.length() + " bytes) to repository: " + targetPath);
-                    performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, existingSha, isRawScript, pipelineMode, callback);
+                    performPutModel(repository, personalAccessToken, eventType, assetId, bpyScript, modelFile, targetPath, existingSha, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
                 }
             }
         });
@@ -389,6 +430,9 @@ public class GitHubWorkflowBridge {
                                  String existingSha,
                                  boolean isRawScript,
                                  String pipelineMode,
+                                 String userPrompt,
+                                 String selectedModel,
+                                 String geminiApiKey,
                                  WorkflowDispatchCallback callback) {
         try {
             byte[] fileBytes = new byte[(int) modelFile.length()];
@@ -400,7 +444,7 @@ public class GitHubWorkflowBridge {
             String b64Content = Base64.encodeToString(fileBytes, Base64.NO_WRAP);
 
             JSONObject putPayload = new JSONObject();
-            putPayload.put("message", "Upload 3D model for autonomous render [Asset: " + assetId + "]");
+            putPayload.put("message", "Upload 3D model for render [Asset: " + assetId + "]");
             putPayload.put("content", b64Content);
             if (existingSha != null && !existingSha.isEmpty()) {
                 putPayload.put("sha", existingSha);
@@ -422,15 +466,15 @@ public class GitHubWorkflowBridge {
                 public void onFailure(Call call, IOException e) {
                     String err = "Model file upload failed: " + e.getMessage();
                     VynaraLogger.e("GitHubWorkflowBridge: " + err);
-                    mainHandler.post(() -> callback.onError(err + " (Upload timed out or was interrupted)"));
+                    mainHandler.post(() -> callback.onError(err));
                 }
 
                 @Override
                 public void onResponse(Call call, Response response) {
                     try {
                         if (response.isSuccessful() || response.code() == 200 || response.code() == 201) {
-                            VynaraLogger.system("GitHubWorkflowBridge: Successfully uploaded 3D model to repository (" + targetPath + ")");
-                            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, callback);
+                            VynaraLogger.system("GitHubWorkflowBridge: Successfully uploaded 3D model (" + targetPath + ")");
+                            executeDispatchCall(repository, personalAccessToken, eventType, assetId, bpyScript, targetPath, isRawScript, pipelineMode, userPrompt, selectedModel, geminiApiKey, callback);
                         } else {
                             String err = "Model upload rejected by GitHub [HTTP " + response.code() + "]: " + response.message();
                             VynaraLogger.e("GitHubWorkflowBridge: " + err);
@@ -456,6 +500,9 @@ public class GitHubWorkflowBridge {
                                      String uploadedModelPath,
                                      boolean isRawScript,
                                      String pipelineMode,
+                                     String userPrompt,
+                                     String selectedModel,
+                                     String geminiApiKey,
                                      WorkflowDispatchCallback callback) {
         String dispatchUrl = "https://api.github.com/repos/" + repository.trim() + "/dispatches";
 
@@ -464,14 +511,16 @@ public class GitHubWorkflowBridge {
             clientPayload.put("asset_id", assetId);
 
             String safeScript = bpyScript != null ? bpyScript : "";
-            try {
-                String b64Script = Base64.encodeToString(safeScript.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
-                clientPayload.put("bpy_script", "b64:" + b64Script);
-                if (b64Script.length() < 16000) {
-                    clientPayload.put("bpy_script_b64", b64Script);
+            if (!safeScript.isEmpty()) {
+                try {
+                    String b64Script = Base64.encodeToString(safeScript.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+                    clientPayload.put("bpy_script", "b64:" + b64Script);
+                    if (b64Script.length() < 16000) {
+                        clientPayload.put("bpy_script_b64", b64Script);
+                    }
+                } catch (Exception e) {
+                    clientPayload.put("bpy_script", safeScript);
                 }
-            } catch (Exception e) {
-                clientPayload.put("bpy_script", safeScript);
             }
 
             if (uploadedModelPath != null && !uploadedModelPath.isEmpty()) {
@@ -485,6 +534,20 @@ public class GitHubWorkflowBridge {
 
             if (pipelineMode != null && !pipelineMode.isEmpty()) {
                 clientPayload.put("pipeline_mode", pipelineMode);
+            }
+
+            // Architecture B payload parameters
+            if (userPrompt != null && !userPrompt.trim().isEmpty()) {
+                clientPayload.put("user_prompt", userPrompt.trim());
+                clientPayload.put("prompt", userPrompt.trim());
+            }
+
+            if (selectedModel != null && !selectedModel.trim().isEmpty()) {
+                clientPayload.put("selected_model", selectedModel.trim());
+            }
+
+            if (geminiApiKey != null && !geminiApiKey.trim().isEmpty()) {
+                clientPayload.put("gemini_api_key", geminiApiKey.trim());
             }
 
             clientPayload.put("timestamp", System.currentTimeMillis());
@@ -740,6 +803,18 @@ public class GitHubWorkflowBridge {
                                                 String assetId,
                                                 File destinationFile,
                                                 WorkflowPollingCallback callback) {
+        awaitWorkflowAndDownloadArtifact(repository, personalAccessToken, assetId, destinationFile, -1, callback);
+    }
+
+    /**
+     * Polling method with explicit excludedRunId to prevent the Attempt 2 race condition.
+     */
+    public void awaitWorkflowAndDownloadArtifact(String repository,
+                                                String personalAccessToken,
+                                                String assetId,
+                                                File destinationFile,
+                                                long excludedRunId,
+                                                WorkflowPollingCallback callback) {
         if (repository == null || repository.trim().isEmpty() || personalAccessToken == null || personalAccessToken.trim().isEmpty()) {
             callback.onError("GitHub credentials are not properly configured.");
             return;
@@ -748,7 +823,8 @@ public class GitHubWorkflowBridge {
         final long dispatchTimeMs = System.currentTimeMillis();
         final long[] activeRunId = new long[]{-1};
         clearLastBlenderError();
-        VynaraLogger.system("GitHubWorkflowBridge: Starting workflow execution monitoring for assetId: " + assetId);
+        VynaraLogger.system("GitHubWorkflowBridge: Starting workflow execution monitoring for assetId: " + assetId 
+                + (excludedRunId > 0 ? " (excluding Run #" + excludedRunId + ")" : ""));
 
         final Runnable[] pollRunnable = new Runnable[1];
         pollRunnable[0] = new Runnable() {
@@ -803,6 +879,13 @@ public class GitHubWorkflowBridge {
 
                                 for (int i = 0; i < runs.length(); i++) {
                                     JSONObject r = runs.getJSONObject(i);
+                                    long runId = r.optLong("id", 0);
+
+                                    // Skip the previous failed run completely
+                                    if (excludedRunId > 0 && runId == excludedRunId) {
+                                        continue;
+                                    }
+
                                     String createdAtStr = r.optString("created_at", "");
                                     long runCreatedAtMs = 0;
                                     try {
@@ -813,11 +896,13 @@ public class GitHubWorkflowBridge {
 
                                     String status = r.optString("status", "unknown");
 
-                                    if ("completed".equalsIgnoreCase(status) && runCreatedAtMs < (dispatchTimeMs - 2000)) {
+                                    // Ignore runs that completed prior to this dispatch
+                                    if ("completed".equalsIgnoreCase(status) && runCreatedAtMs < dispatchTimeMs) {
                                         continue;
                                     }
 
-                                    if (runCreatedAtMs >= (dispatchTimeMs - 5000)) {
+                                    // Strictly match runs dispatched for this session
+                                    if (runCreatedAtMs >= (dispatchTimeMs - 1000)) {
                                         targetRun = r;
                                         break;
                                     }
@@ -1106,10 +1191,6 @@ public class GitHubWorkflowBridge {
         });
     }
 
-    /**
-     * Extracts the 3D model (.glb), preview image (.png), cinematic video (.mp4/.webm),
-     * and parses error.txt / blender_execution.log with throttled summary output.
-     */
     private boolean extractGlbFromZip(File zipFile, File destinationGlbFile) {
         boolean glbFound = false;
         try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
@@ -1183,7 +1264,6 @@ public class GitHubWorkflowBridge {
                         sLastBlenderError = extractErrorLine(sLastBlenderTraceback);
                     }
 
-                    // Safe Throttled Logging: Prevent flooding Android UI thread with 15,000+ frame lines
                     String[] lines = logContent.split("\\r?\\n");
                     int totalLines = lines.length;
                     int tailStartIndex = Math.max(0, totalLines - 40);
@@ -1253,10 +1333,6 @@ public class GitHubWorkflowBridge {
         return lines[lines.length - 1].trim();
     }
 
-    /**
-     * Computes the Git Blob SHA-1 of a local file (matching GitHub's content blob SHA algorithm).
-     * Format: sha1("blob <size>\0<content>")
-     */
     private static String computeGitBlobSha(File file) {
         if (file == null || !file.exists() || !file.isFile()) return null;
         try {
