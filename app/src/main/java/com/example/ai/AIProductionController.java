@@ -7,6 +7,7 @@ import com.example.ai.agents.DirectorAgent;
 import com.example.ai.protocol.AIDirectorSpec;
 import com.example.ai.protocol.AIPipelineMode;
 import com.example.ai.protocol.AIProductionRequest;
+import com.example.asset.Asset;
 import com.example.character.CharacterManager;
 import com.example.cloud.CloudProvider;
 import com.example.engine.ThreeDEngine;
@@ -141,18 +142,34 @@ public class AIProductionController {
             }
         }
 
+        // Check if an imported 3D model asset is actively selected in the scene
+        boolean hasImportedAsset = false;
+        String importedAssetPath = null;
+        try {
+            if (runtime != null) {
+                Asset activeAsset = runtime.getActiveSelectedAsset();
+                if (activeAsset != null && activeAsset.getFilePath() != null) {
+                    File modelCandidate = new File(activeAsset.getFilePath());
+                    if (modelCandidate.exists() && modelCandidate.length() > 0) {
+                        hasImportedAsset = true;
+                        importedAssetPath = modelCandidate.getAbsolutePath();
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+
         boolean hasPrompt = (userPrompt != null && !userPrompt.trim().isEmpty());
         boolean hasScript = (customScriptPath != null);
         boolean hasCloudAuth = apiKeyManager.hasApiKey() 
                 || (apiKeyManager.getGitHubPat() != null && !apiKeyManager.getGitHubPat().trim().isEmpty())
                 || apiKeyManager.hasGitHubConfig();
 
-        // STRICT PRE-FLIGHT CONTRACT VALIDATION (PREVENTS SILENT DEGRADATION TO FALLBACK)
+        // STRICT PRE-FLIGHT CONTRACT VALIDATION
         AIPipelineMode.ExecutionValidationStatus status = mode.validateExecutionContract(hasPrompt, hasScript, refImageCount, hasCloudAuth);
-        if (!status.isValid()) {
+        if (!status.isValid() && !hasImportedAsset) {
             VynaraLogger.validation(VynaraLogger.LogLevel.ERROR, "AIProductionController: Contract check REJECTED: " + status.getErrorMessage());
             callback.onError(status.getErrorMessage());
-            return; // STRICT HALT: Stops immediately without generating fallback cubes!
+            return;
         }
 
         // =========================================================================
@@ -182,7 +199,7 @@ public class AIProductionController {
         }
 
         // =========================================================================
-        // PIPELINE OPTION B2: INTERACTIVE AI DESIGN CHECKPOINTS (HUMAN-IN-THE-LOOP)
+        // PIPELINE OPTION B2: INTERACTIVE AI DESIGN CHECKPOINTS
         // =========================================================================
         if (mode.isInteractive()) {
             VynaraLogger.system("AIProductionController: [OPTION B2] Initializing Interactive AI Designer Checkpoint Plan...");
@@ -252,7 +269,7 @@ public class AIProductionController {
         }
 
         // =========================================================================
-        // PIPELINE OPTION A: PROCEDURAL PYTHON SCRIPT (STANDALONE SCRIPT UPLOAD)
+        // PATHWAY 1: STANDALONE PYTHON SCRIPT UPLOAD (Direct Dispatch Mode)
         // =========================================================================
         if (customScriptPath != null) {
             VynaraLogger.system("AIProductionController: [OPTION A] Custom Python script detected [" + customScriptPath + "]. Direct dispatch mode.");
@@ -266,6 +283,38 @@ public class AIProductionController {
             return;
         }
 
+        // =========================================================================
+        // PATHWAY 2: 3D MODEL IMPORT + ANIMATION (Boot Blender First -> Cloud Gemini)
+        // When a 3D asset is attached, bypass local script generation on the phone!
+        // Blender in the cloud boots first, measures bounding box, and calls Gemini.
+        // =========================================================================
+        if (hasImportedAsset) {
+            VynaraLogger.system("AIProductionController: [OPTION A] Active 3D model detected [" + importedAssetPath + "]. Engaging Cloud Blender-first pipeline.");
+            ProductionPlan modelPlan = orchestrator.planProduction(userPrompt, style, engine, resolvedUris);
+            if (modelPlan != null && modelPlan.getTaskGraph() != null) {
+                for (TaskNode node : modelPlan.getTaskGraph().getAllNodes()) {
+                    if (node.getOperation() != null && "blender.cloud_generate".equals(node.getOperation().getToolId())) {
+                        // Do not synthesize python on phone; cloud Blender will talk to Gemini with real bounding box
+                        node.getOperation().setParam("bpyScript", "");
+                        node.getOperation().setParam("blender_script", "");
+                        node.getOperation().setParam("is_raw_script", false);
+                        node.getOperation().setParam("isRawUserScript", false);
+                        node.getOperation().setParam("prompt", userPrompt != null ? userPrompt : "Animate and render imported 3D model in cinematic scene");
+                        node.getOperation().setParam("pipelineMode", AIPipelineMode.PROCEDURAL_PYTHON.getId());
+                        node.setTitle("Cloud Blender Director & Animation");
+                        node.setDescription("Blender boots headlessly, imports 3D mesh, and connects to Gemini live");
+                        VynaraLogger.system("AIProductionController: Configured cloud-first live Blender task [" + node.getId() + "] (is_raw_script=false)");
+                    }
+                }
+            }
+            this.currentPlan = modelPlan;
+            callback.onSuccess(modelPlan);
+            return;
+        }
+
+        // =========================================================================
+        // PATHWAY 3: TEXT-TO-3D PROCEDURAL GENERATION (Prompt only, no model)
+        // =========================================================================
         VynaraLogger.system("AIProductionController: [OPTION A] Querying Gemini for procedural 3D production plan...");
         AIProductionRequest request = new AIProductionRequest(userPrompt, style, engine);
         if (resolvedUris != null) {
