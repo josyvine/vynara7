@@ -117,9 +117,11 @@ jobs:
                 os.path.exists('input_model.fbx') or os.path.exists('inputs/input_model.fbx')
             )
 
-            is_raw_script = bool(payload.get('isRawUserScript', False))
-            if not has_imported_model and bool(payload.get('is_raw_script', False)):
-                is_raw_script = True
+            # If a 3D model is present, NEVER treat it as raw script
+            is_raw_script = False
+            if not has_imported_model:
+                if bool(payload.get('isRawUserScript', False)) or bool(payload.get('is_raw_script', False)):
+                    is_raw_script = True
 
             user_prompt = payload.get('user_prompt', payload.get('prompt', '')).strip()
             selected_model = payload.get('selected_model', 'gemini-2.5-flash').strip()
@@ -154,14 +156,18 @@ jobs:
 
             os.makedirs('output', exist_ok=True)
 
+            # Wipe default Blender startup objects (Cube, Camera, Light)
+            bpy.ops.object.select_all(action='SELECT')
+            bpy.ops.object.delete(use_global=False)
+
             with open('task_config.json', 'r', encoding='utf-8') as f:
                 cfg = json.load(f)
 
             is_raw_script = cfg.get("is_raw_script", False)
             has_imported_model = cfg.get("has_imported_model", False)
-            user_prompt = cfg.get("user_prompt", "")
+            user_prompt = cfg.get("user_prompt", "").strip()
             selected_model = cfg.get("selected_model", "gemini-2.5-flash")
-            gemini_api_key = cfg.get("gemini_api_key", "")
+            gemini_api_key = cfg.get("gemini_api_key", "").strip()
             has_raw_bpy_script = cfg.get("has_raw_bpy_script", False)
 
             # -------------------------------------------------------------------------
@@ -234,16 +240,9 @@ jobs:
             dim = max(max_x - min_x, max_y - min_y, max_z - min_z) if has_bounds else 2.0
             dim = max(dim, 0.5)
 
-            # If user provided a raw script for the imported model, execute it. Otherwise, call Gemini live.
-            if has_raw_bpy_script and not is_raw_script and os.path.exists('input_script.py'):
-                with open('input_script.py', 'r', encoding='utf-8') as sf:
-                    code = sf.read()
-                code = code.replace("scene.fps", "scene.render.fps")
-                code = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", code)
-                code = re.sub(r"\.sun_azimuth\b", ".sun_rotation", code)
-                code = re.sub(r"\.sun_elevation\b", ".sun_direction", code)
-                exec(code, globals())
-            elif gemini_api_key and user_prompt:
+            effective_prompt = user_prompt if user_prompt else "Cinematic dynamic high-speed animation, realistic lighting, and camera tracking for imported 3D model"
+
+            if gemini_api_key:
                 print(f"Calling Gemini API live from Blender using model: {selected_model}")
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:generateContent?key={gemini_api_key}"
 
@@ -262,7 +261,7 @@ jobs:
                 )
 
                 req_body = {
-                    "contents": [{"parts": [{"text": f"User Creative Prompt: {user_prompt}"}]}],
+                    "contents": [{"parts": [{"text": f"User Creative Prompt: {effective_prompt}"}]}],
                     "systemInstruction": {"parts": [{"text": system_inst}]}
                 }
 
