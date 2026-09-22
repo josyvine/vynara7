@@ -404,23 +404,6 @@ public class ToolExecutor {
                 String pipelineModeStr = op.getStringParam("pipelineMode", AIPipelineMode.PROCEDURAL_PYTHON.getId());
                 AIPipelineMode activeMode = AIPipelineMode.fromDisplayNameSafe(pipelineModeStr);
 
-                boolean isRawScript = "true".equalsIgnoreCase(op.getStringParam("is_raw_script", "false"))
-                        || "true".equalsIgnoreCase(op.getStringParam("isRawUserScript", "false"))
-                        || (activeMode == AIPipelineMode.PROCEDURAL_PYTHON && !bpyScript.isEmpty() && !bpyScript.contains("Model_Root"));
-
-                String eventType = activeMode.getGithubEventType();
-                if ("blender.agentic_autonomous".equals(id)) {
-                    eventType = "vynara_agentic_auto";
-                } else if ("blender.agentic_interactive".equals(id)) {
-                    eventType = "vynara_agentic_interactive";
-                }
-
-                if (isRawScript && !bpyScript.startsWith("# VYNARA_PIPELINE:")) {
-                    bpyScript = "# VYNARA_PIPELINE: OPTION_A (is_raw_script=True)\n" + bpyScript;
-                }
-
-                VynaraLogger.system("Executing " + id + " [Mode: " + activeMode.getDisplayName() + ", Event: " + eventType + ", isRawScript=" + isRawScript + "]");
-
                 ApiKeyManager keyManager = ProjectRuntime.getInstance().getAIOrchestrator().getApiKeyManager();
                 CloudProvider provider = keyManager.getComputeProvider();
 
@@ -451,22 +434,45 @@ public class ToolExecutor {
                     modelsDir.mkdirs();
                 }
 
-                // Resolve input model if attached to scene/runtime
+                // 1. Resolve input 3D model if attached in active project/scene runtime
                 File inputModelFile = null;
-                if (!isRawScript) {
-                    try {
-                        ProjectRuntime runtime = ProjectRuntime.getInstance();
-                        if (runtime != null) {
-                            Asset activeAsset = runtime.getActiveSelectedAsset();
-                            if (activeAsset != null && activeAsset.getFilePath() != null) {
-                                File candidateFile = new File(activeAsset.getFilePath());
-                                if (candidateFile.exists() && candidateFile.length() > 0) {
-                                    inputModelFile = candidateFile;
-                                }
+                try {
+                    ProjectRuntime runtime = ProjectRuntime.getInstance();
+                    if (runtime != null) {
+                        Asset activeAsset = runtime.getActiveSelectedAsset();
+                        if (activeAsset != null && activeAsset.getFilePath() != null) {
+                            File candidateFile = new File(activeAsset.getFilePath());
+                            if (candidateFile.exists() && candidateFile.length() > 0) {
+                                inputModelFile = candidateFile;
                             }
                         }
-                    } catch (Throwable ignored) {}
+                    }
+                } catch (Throwable ignored) {}
+
+                // 2. Strict Raw Script Determination:
+                // isRawScript is ONLY true if a custom python script was explicitly uploaded AND no 3D model was imported.
+                boolean isExplicitRaw = "true".equalsIgnoreCase(op.getStringParam("is_raw_script", "false"))
+                        || "true".equalsIgnoreCase(op.getStringParam("isRawUserScript", "false"));
+
+                boolean isRawScript = isExplicitRaw && (inputModelFile == null);
+
+                // If a 3D model is attached, force script to empty string so cloud Blender boots first and talks to Gemini live
+                if (inputModelFile != null) {
+                    bpyScript = "";
                 }
+
+                String eventType = activeMode.getGithubEventType();
+                if ("blender.agentic_autonomous".equals(id)) {
+                    eventType = "vynara_agentic_auto";
+                } else if ("blender.agentic_interactive".equals(id)) {
+                    eventType = "vynara_agentic_interactive";
+                }
+
+                if (isRawScript && !bpyScript.startsWith("# VYNARA_PIPELINE:")) {
+                    bpyScript = "# VYNARA_PIPELINE: OPTION_A (is_raw_script=True)\n" + bpyScript;
+                }
+
+                VynaraLogger.system("Executing " + id + " [Mode: " + activeMode.getDisplayName() + ", Event: " + eventType + ", isRawScript=" + isRawScript + ", hasModel=" + (inputModelFile != null) + "]");
 
                 int maxAiAttempts = activeMode.isAgentic() ? 1 : 2;
                 String currentBpyScript = bpyScript;
@@ -535,7 +541,7 @@ public class ToolExecutor {
                         final boolean finalIsRaw = isRawScript;
                         final String finalPrompt = prompt;
                         final String selectedModel = keyManager.getSelectedModel();
-                        final String effectiveModeStr = (activeMode == AIPipelineMode.PROCEDURAL_PYTHON || isRawScript) ? "OPTION_A" : activeMode.getId();
+                        final String effectiveModeStr = (isRawScript) ? "OPTION_A" : activeMode.getId();
 
                         ghBridge.dispatchGenerationWorkflowWithModel(
                                 targetRepo,
