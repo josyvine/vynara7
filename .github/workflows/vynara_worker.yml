@@ -117,7 +117,6 @@ jobs:
                 os.path.exists('input_model.fbx') or os.path.exists('inputs/input_model.fbx')
             )
 
-            # If a 3D model is present, NEVER treat it as raw script
             is_raw_script = False
             if not has_imported_model:
                 if bool(payload.get('isRawUserScript', False)) or bool(payload.get('is_raw_script', False)):
@@ -156,7 +155,7 @@ jobs:
 
             os.makedirs('output', exist_ok=True)
 
-            # Wipe default Blender startup objects (Cube, Camera, Light)
+            # Wipe default startup objects
             bpy.ops.object.select_all(action='SELECT')
             bpy.ops.object.delete(use_global=False)
 
@@ -170,6 +169,17 @@ jobs:
             gemini_api_key = cfg.get("gemini_api_key", "").strip()
             has_raw_bpy_script = cfg.get("has_raw_bpy_script", False)
 
+            def sanitize_blender_code(code_str):
+                code_str = code_str.replace("scene.fps", "scene.render.fps")
+                code_str = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", code_str)
+                code_str = re.sub(r"['\"]High Contrast['\"]", "'AgX - High Contrast'", code_str)
+                code_str = re.sub(r"['\"]Very High Contrast['\"]", "'AgX - Very High Contrast'", code_str)
+                code_str = re.sub(r"\.sun_azimuth\b", ".sun_rotation", code_str)
+                code_str = re.sub(r"\.sun_elevation\b", ".sun_direction", code_str)
+                code_str = re.sub(r"nodes\.ShaderNode([A-Za-z0-9_]+)\b", r"nodes.new(type='ShaderNode\1')", code_str)
+                code_str = re.sub(r"^([ \t]*)(.*view_settings\.look\s*=.*)$", r"\1try:\n\1    \2\n\1except Exception: pass", code_str, flags=re.MULTILINE)
+                return code_str
+
             # -------------------------------------------------------------------------
             # TRACK 1: RAW PYTHON AUTOMATION (STANDALONE PYTHON SCRIPT UPLOAD ONLY)
             # -------------------------------------------------------------------------
@@ -178,11 +188,8 @@ jobs:
                 if os.path.exists('input_script.py'):
                     with open('input_script.py', 'r', encoding='utf-8') as sf:
                         code = sf.read()
-                    code = code.replace("scene.fps", "scene.render.fps")
-                    code = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", code)
-                    exec(code, globals())
+                    exec(sanitize_blender_code(code), globals())
 
-                # Export 3D mesh model
                 bpy.ops.export_scene.gltf(
                     filepath='output/model.glb',
                     export_format='GLB',
@@ -192,14 +199,13 @@ jobs:
                     export_materials='EXPORT'
                 )
 
-                # Render single still preview snapshot
                 sc = bpy.context.scene
                 sc.render.filepath = 'output/render.png'
                 sc.render.engine = 'CYCLES'
                 sc.cycles.device = 'CPU'
                 sc.cycles.samples = 4
                 bpy.ops.render.render(write_still=True)
-                print("SUCCESS: Raw Python 3D Model and still preview generated.")
+                print("SUCCESS: Raw Python 3D Model and preview generated.")
                 sys.exit(0)
 
             # -------------------------------------------------------------------------
@@ -207,7 +213,6 @@ jobs:
             # -------------------------------------------------------------------------
             print("Vynara Runner: Executing Track 2 [Live Blender-First Scene & Animation]")
 
-            # Import model if present
             imported_model = None
             for candidate in ['input_model.glb', 'inputs/input_model.glb', 'input_model.fbx', 'inputs/input_model.fbx', 'input_model.obj']:
                 if os.path.exists(candidate):
@@ -225,7 +230,7 @@ jobs:
                         imported_model = candidate
                         break
 
-            # Calculate real bounding box of all mesh objects
+            # Calculate real bounding box of all imported mesh objects
             mesh_objs = [o for o in bpy.data.objects if o.type == 'MESH']
             min_x = min_y = min_z = float('inf')
             max_x = max_y = max_z = float('-inf')
@@ -240,7 +245,7 @@ jobs:
             dim = max(max_x - min_x, max_y - min_y, max_z - min_z) if has_bounds else 2.0
             dim = max(dim, 0.5)
 
-            effective_prompt = user_prompt if user_prompt else "Cinematic dynamic high-speed animation, realistic lighting, and camera tracking for imported 3D model"
+            effective_prompt = user_prompt if user_prompt else "Cinematic dynamic 3D animation, road environment, photorealistic lighting, and camera tracking for imported model"
 
             if gemini_api_key:
                 print(f"Calling Gemini API live from Blender using model: {selected_model}")
@@ -249,15 +254,15 @@ jobs:
                 system_inst = (
                     "You are a professional 3D technical director writing Python code inside a LIVE Blender 4.2 session.\n"
                     f"Active Scene State: Imported Model Present={bool(imported_model)}, Bounding Box Center={center}, Max Dimension={dim}m.\n"
-                    "RULES:\n"
+                    "CRITICAL BLENDER 4.2 RULES:\n"
                     "1. Output ONLY executable Python code inside a ```python ``` code block.\n"
-                    "2. Principled BSDF color inputs expect 4-element RGBA tuples: (r, g, b, 1.0).\n"
-                    "3. Motion blur is set via scene.render.use_motion_blur = True and scene.render.motion_blur_shutter.\n"
-                    "4. Object transform matrices are obj.matrix_world or obj.matrix_basis.\n"
-                    "5. Set scene.frame_start = 1. Scene FPS is set via scene.render.fps (NEVER scene.fps).\n"
-                    "6. In headless Linux Blender, NEVER call addon_utils.enable('rigify') or archimesh.\n"
-                    "7. ShaderNodeTexSky uses sun_rotation or sun_direction (NEVER sun_azimuth or sun_elevation).\n"
-                    "8. Do not re-import the asset; build the environment, materials, camera, and keyframe animation around existing objects."
+                    "2. Principled BSDF inputs: 'Base Color' requires 4-element RGBA (r, g, b, 1.0). 'Roughness', 'Metallic' are floats.\n"
+                    "3. To create shader nodes, use nodes.new(type='ShaderNodeBsdfPrincipled'), NEVER nodes.ShaderNodeBsdfPrincipled.\n"
+                    "4. Set scene.frame_start = 1 and scene.frame_end = 60. Set FPS via scene.render.fps = 24 (NEVER scene.fps).\n"
+                    "5. MUST insert animation keyframes on camera or objects using obj.keyframe_insert(data_path='location', frame=...).\n"
+                    "6. Color management: view_settings.look MUST be 'AgX - High Contrast' or 'AgX - Punchy' (NEVER 'High Contrast').\n"
+                    "7. Never call addon_utils.enable('rigify') or archimesh.\n"
+                    "8. Do not re-import the model; construct the road, environment geometry, camera rig, and animation keyframes around the existing mesh objects."
                 )
 
                 req_body = {
@@ -265,53 +270,46 @@ jobs:
                     "systemInstruction": {"parts": [{"text": system_inst}]}
                 }
 
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(req_body).encode('utf-8'),
-                    headers={'Content-Type': 'application/json'}
-                )
+                def query_gemini_code(body_payload):
+                    req = urllib.request.Request(url, data=json.dumps(body_payload).encode('utf-8'), headers={'Content-Type': 'application/json'})
+                    with urllib.request.urlopen(req, timeout=35) as resp:
+                        resp_data = json.loads(resp.read().decode('utf-8'))
+                        text = resp_data['candidates'][0]['content']['parts'][0]['text']
+                        if '```python' in text:
+                            return text.split('```python')[1].split('```')[0].strip()
+                        elif '```' in text:
+                            return text.split('```')[1].split('```')[0].strip()
+                        return text.strip()
 
                 try:
-                    with urllib.request.urlopen(req, timeout=30) as resp:
-                        resp_data = json.loads(resp.read().decode('utf-8'))
-                        ai_text = resp_data['candidates'][0]['content']['parts'][0]['text']
+                    current_code = query_gemini_code(req_body)
 
-                        if '```python' in ai_text:
-                            ai_code = ai_text.split('```python')[1].split('```')[0].strip()
-                        elif '```' in ai_text:
-                            ai_code = ai_text.split('```')[1].split('```')[0].strip()
-                        else:
-                            ai_code = ai_text.strip()
-
-                        # Normalize common AI hallucinations for Blender 4.2
-                        ai_code = ai_code.replace("scene.fps", "scene.render.fps")
-                        ai_code = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", ai_code)
-                        ai_code = re.sub(r"\.sun_azimuth\b", ".sun_rotation", ai_code)
-                        ai_code = re.sub(r"\.sun_elevation\b", ".sun_direction", ai_code)
-
+                    # Multi-turn resilient repair loop (up to 3 turns)
+                    for repair_turn in range(3):
+                        sanitized = sanitize_blender_code(current_code)
                         try:
-                            exec(ai_code, globals())
+                            exec(sanitized, globals())
+                            print(f"Gemini script executed successfully (Turn {repair_turn+1}).")
+                            break
                         except Exception as live_err:
-                            print(f"Live Execution Notice: {live_err}. Requesting repair...")
-                            repair_prompt = f"The previous script threw this exception: {traceback.format_exc()}. Provide the complete corrected Python code adhering to Blender 4.2 API."
-                            req_body['contents'].append({"parts": [{"text": ai_text}]})
-                            req_body['contents'].append({"parts": [{"text": repair_prompt}]})
-                            req_repair = urllib.request.Request(url, data=json.dumps(req_body).encode('utf-8'), headers={'Content-Type': 'application/json'})
-                            with urllib.request.urlopen(req_repair, timeout=30) as rep_resp:
-                                rep_data = json.loads(rep_resp.read().decode('utf-8'))
-                                rep_text = rep_data['candidates'][0]['content']['parts'][0]['text']
-                                rep_code = rep_text.split('```python')[1].split('```')[0].strip() if '```python' in rep_text else rep_text.strip()
-                                rep_code = rep_code.replace("scene.fps", "scene.render.fps")
-                                rep_code = re.sub(r"addon_utils\.enable\(['\"](?:rigify|archimesh)['\"]\)", "pass", rep_code)
-                                rep_code = re.sub(r"\.sun_azimuth\b", ".sun_rotation", rep_code)
-                                rep_code = re.sub(r"\.sun_elevation\b", ".sun_direction", rep_code)
-                                exec(rep_code, globals())
+                            tb = traceback.format_exc()
+                            print(f"Live Execution Error (Turn {repair_turn+1}/3): {live_err}")
+                            if repair_turn == 2:
+                                print("Max live repair attempts reached. Proceeding to universal export.")
+                                break
+
+                            repair_msg = f"The previous script failed with this Blender 4.2 exception:\n{tb}\nFix the error and output ONLY the complete corrected Python code."
+                            req_body['contents'].append({"parts": [{"text": current_code}]})
+                            req_body['contents'].append({"parts": [{"text": repair_msg}]})
+                            current_code = query_gemini_code(req_body)
+
                 except Exception as api_err:
                     print(f"Gemini API Live Call Warning: {api_err}")
 
-            # --- UNIVERSAL RENDER & EXPORT STAGE ---
+            # --- UNIVERSAL RENDER & CAMERA RE-FRAMING STAGE ---
             sc = bpy.context.scene
 
+            # Ensure World lighting exists
             if not sc.world:
                 sc.world = bpy.data.worlds.new('Vynara_World')
             sc.world.use_nodes = True
@@ -321,15 +319,17 @@ jobs:
                 out = sc.world.node_tree.nodes.get('World Output') or sc.world.node_tree.nodes.new('ShaderNodeOutputWorld')
                 sc.world.node_tree.links.new(bg.outputs['Background'], out.inputs['Surface'])
             bg.inputs['Color'].default_value = (0.75, 0.85, 0.95, 1.0)
-            bg.inputs['Strength'].default_value = max(float(bg.inputs['Strength'].default_value), 1.0)
+            bg.inputs['Strength'].default_value = max(float(bg.inputs['Strength'].default_value), 1.2)
 
+            # Ensure Sunlight exists
             if not any(o.type == 'LIGHT' for o in bpy.data.objects):
                 sdata = bpy.data.lights.new('Key_Sun', 'SUN')
-                sdata.energy = 4.0
+                sdata.energy = 5.0
                 sun = bpy.data.objects.new('Key_Sun', sdata)
                 bpy.context.collection.objects.link(sun)
                 sun.rotation_euler = (math.radians(50.0), math.radians(20.0), math.radians(-35.0))
 
+            # Camera Framing: Ensure camera is at a clear 3/4 cinematic offset, never inside the car body
             cam = sc.camera
             if not cam:
                 for o in bpy.data.objects:
@@ -339,17 +339,33 @@ jobs:
                 cdata = bpy.data.cameras.new('Universal_Camera')
                 cam = bpy.data.objects.new('Universal_Camera', cdata)
                 bpy.context.collection.objects.link(cam)
-                cam.location = (center.x - dim * 1.5, center.y - dim * 2.0, center.z + dim * 0.9)
-                cam_dir = center - cam.location
-                cam.rotation_euler = cam_dir.to_track_quat('-Z', 'Y').to_euler()
-            sc.camera = cam
-            if cam and cam.data:
-                cam.data.clip_start = max(0.01, dim * 0.01)
+                sc.camera = cam
+
+            cam.location = (center.x - dim * 1.8, center.y - dim * 2.2, center.z + dim * 1.1)
+            cam_dir = center - cam.location
+            cam.rotation_euler = cam_dir.to_track_quat('-Z', 'Y').to_euler()
+            if cam.data:
+                cam.data.clip_start = 0.1
                 cam.data.clip_end = max(1000.0, dim * 50.0)
 
+            # Guaranteed Animation Fallback: If no keyframes exist, create an active camera flyby so MP4 always renders
+            has_anim = any(obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0 for obj in bpy.data.objects)
+            if not has_anim:
+                print("Injecting dynamic camera flyby animation track (60 frames)...")
+                sc.frame_start = 1
+                sc.frame_end = 60
+                sc.render.fps = 24
+                cam.location = (center.x - dim * 2.2, center.y - dim * 2.5, center.z + dim * 1.2)
+                cam.keyframe_insert(data_path='location', frame=1)
+                cam.location = (center.x + dim * 1.8, center.y - dim * 1.8, center.z + dim * 0.9)
+                cam.keyframe_insert(data_path='location', frame=60)
+                has_anim = True
+
+            # Export 3D Scene to model.glb
             for o in list(bpy.data.objects):
                 if o.type == 'MESH' and any(k in o.name.lower() for k in ['fog', 'volume', 'domain', 'atmosphere']):
                     bpy.data.objects.remove(o, do_unlink=True)
+
             bpy.ops.export_scene.gltf(
                 filepath='output/model.glb',
                 export_format='GLB',
@@ -360,6 +376,7 @@ jobs:
             )
             print("SUCCESS: 3D Scene exported to output/model.glb")
 
+            # Render High-Quality Cycles Preview Frame
             sc.render.engine = 'CYCLES'
             sc.cycles.device = 'CPU'
             sc.cycles.samples = 4
@@ -371,10 +388,10 @@ jobs:
             bpy.ops.render.render(write_still=True)
             print("SUCCESS: Preview snapshot complete: output/render.png")
 
-            has_anim = any(obj.animation_data and obj.animation_data.action and len(obj.animation_data.action.fcurves) > 0 for obj in bpy.data.objects)
+            # Render Cinematic MP4 Video Sequence
             if has_anim and not os.path.exists('output/cinematic.mp4'):
                 total_frames = max(1, sc.frame_end - sc.frame_start + 1)
-                print(f"Active Animation Detected: Rendering {total_frames} dynamic frames (frame {sc.frame_start} to {sc.frame_end})...")
+                print(f"Active Animation: Rendering {total_frames} frames to cinematic.mp4...")
                 sc.render.image_settings.file_format = 'FFMPEG'
                 sc.render.ffmpeg.format = 'MPEG4'
                 sc.render.ffmpeg.codec = 'H264'
