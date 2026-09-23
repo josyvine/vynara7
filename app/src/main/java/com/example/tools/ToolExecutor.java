@@ -638,8 +638,10 @@ public class ToolExecutor {
                     }
 
                     try {
+                        // Resilient 900s (15 min) timeout latch so mobile device never cuts off in-progress cloud builds
                         long waitTimeout = activeMode.getMaxTimeoutMs() / 1000;
-                        latch.await(waitTimeout > 0 ? waitTimeout : 300, TimeUnit.SECONDS);
+                        long effectiveWait = waitTimeout > 0 ? Math.max(waitTimeout, 900) : 900;
+                        latch.await(effectiveWait, TimeUnit.SECONDS);
                     } catch (InterruptedException ignored) {}
 
                     if (attemptSuccess.get()) {
@@ -765,9 +767,9 @@ public class ToolExecutor {
                                     engine.getSceneManager().getActiveScene().addObject(obj);
                                 }
                                 for (Character riggedChar : result.getCharacters()) {
-                                    characterManager.registerCharacter(riggedChar);
-                                    if (riggedChar.getSceneObject() != null) {
-                                        engine.getSceneManager().getActiveScene().addObject(riggedChar.getSceneObject());
+                                    characterManager.registerCharacter(ch);
+                                    if (ch.getSceneObject() != null) {
+                                        engine.getSceneManager().getActiveScene().addObject(ch.getSceneObject());
                                     }
                                 }
                                 engine.getSceneManager().updateWorldTransforms();
@@ -1016,10 +1018,12 @@ public class ToolExecutor {
                 float cy = (minY + maxY) / 2.0f;
                 float cz = (minZ + maxZ) / 2.0f;
                 float span = Math.max(maxX - minX, Math.max(maxY - minY, maxZ - minZ));
-                float dist = Math.max(span * 1.5f, 6.0f);
+                
+                // Generous 2.5x camera framing distance with 3/4 isometric offset so large assets never clip inside the camera lens
+                float dist = Math.max(span * 2.5f, 10.0f);
 
                 engine.getCameraManager().getActiveCamera().setTarget(cx, cy, cz);
-                engine.getCameraManager().getActiveCamera().setEye(cx, cy + (dist * 0.4f), cz + dist);
+                engine.getCameraManager().getActiveCamera().setEye(cx - (dist * 0.7f), cy + (dist * 0.5f), cz + dist);
             }
         } catch (Exception ignored) {}
     }
