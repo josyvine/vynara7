@@ -766,7 +766,7 @@ public class ToolExecutor {
                                 for (SceneObject obj : result.getSceneObjects()) {
                                     engine.getSceneManager().getActiveScene().addObject(obj);
                                 }
-                                for (Character riggedChar : result.getCharacters()) {
+                                for (Character ch : result.getCharacters()) {
                                     characterManager.registerCharacter(ch);
                                     if (ch.getSceneObject() != null) {
                                         engine.getSceneManager().getActiveScene().addObject(ch.getSceneObject());
